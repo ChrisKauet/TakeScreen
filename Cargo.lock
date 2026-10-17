@@ -1740,7 +1740,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "telao"
+name = "takescreen"
 version = "0.1.0"
 dependencies = [
  "eframe",

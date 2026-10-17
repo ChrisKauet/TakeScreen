@@ -1,4 +1,4 @@
-//! Telão: painel do operador para escolher o que aparece no datashow (segunda tela).
+//! TakeScreen: painel do operador para escolher o que aparece no datashow (segunda tela).
 //!
 //! Funciona como o Modo Estúdio do OBS: em cima a PRÉVIA (o que você escolheu) e o
 //! NO AR (o que o público está vendo); embaixo os programas abertos, cada um com o
@@ -7,7 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(not(windows))]
-compile_error!("O Telão só funciona no Windows. Compile com --target x86_64-pc-windows-gnu ou no próprio Windows.");
+compile_error!("O TakeScreen só funciona no Windows. Compile com --target x86_64-pc-windows-gnu ou no próprio Windows.");
 
 mod win;
 
@@ -310,7 +310,7 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Telão").size(20.0).strong());
+            ui.label(egui::RichText::new("TakeScreen").size(20.0).strong());
             ui.add_space(16.0);
             ui.label("Datashow:");
             let mut chosen = self.datashow;
@@ -324,7 +324,7 @@ impl App {
             ui.add_space(16.0);
             let mut protect = !self.cfg.protection_off;
             ui.checkbox(&mut protect, "Proteger datashow")
-                .on_hover_text("Qualquer janela que abrir na tela 2 sem passar pelo Telão volta na hora para a tela 1.");
+                .on_hover_text("Qualquer janela que abrir na tela 2 sem passar pelo TakeScreen volta na hora para a tela 1.");
             self.cfg.protection_off = !protect;
             if self.monitors.len() < 2 {
                 ui.colored_label(AIR_COLOR, "Só um monitor conectado. Ligue o datashow.");
@@ -615,10 +615,10 @@ impl eframe::App for App {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Telão")
+            .with_title("TakeScreen")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([900.0, 560.0]),
         ..Default::default()
     };
-    eframe::run_native("Telão", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    eframe::run_native("TakeScreen", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }

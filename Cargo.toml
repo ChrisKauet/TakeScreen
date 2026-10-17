@@ -1,5 +1,5 @@
 [package]
-name = "telao"
+name = "takescreen"
 version = "0.1.0"
 edition = "2021"
 description = "Painel de operador para controlar o que aparece no datashow (segunda tela)"
@@ -27,3 +27,7 @@ windows = { version = "0.62", features = [
 opt-level = 3
 lto = true
 strip = true
+
+[[bin]]
+name = "TakeScreen"
+path = "src/main.rs"

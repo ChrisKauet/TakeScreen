@@ -313,14 +313,14 @@ pub fn create_curtain(r: Rect) -> Option<Hwnd> {
             lpfnWndProc: Some(wndproc),
             hInstance: hinst,
             hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
-            lpszClassName: w!("TelaoCortina"),
+            lpszClassName: w!("TakeScreenCortina"),
             ..Default::default()
         };
         RegisterClassW(&class);
         let h = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            w!("TelaoCortina"),
-            w!("Telão - cortina"),
+            w!("TakeScreenCortina"),
+            w!("TakeScreen - cortina"),
             WS_POPUP,
             r.left,
             r.top,
@@ -649,7 +649,7 @@ unsafe fn icon_to_rgba(icon: HICON) -> Option<Icon> {
 
 // ---------------------------------------------------------------------------
 // Proteção do datashow: qualquer janela que aparecer na tela 2 sem passar pelo
-// Telão (um programa aberto sem querer, uma janela que lembrou da última posição)
+// TakeScreen (um programa aberto sem querer, uma janela que lembrou da última posição)
 // é devolvida na hora para a tela 1.
 
 use std::sync::{Mutex, OnceLock};
