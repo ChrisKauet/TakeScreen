@@ -1,6 +1,6 @@
 [package]
 name = "takescreen"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Painel de operador para controlar o que aparece no datashow (segunda tela)"
 
@@ -8,6 +8,7 @@ description = "Painel de operador para controlar o que aparece no datashow (segu
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "persistence"] }
 serde = { version = "1", features = ["derive"] }
 raw-window-handle = "0.6"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -21,6 +22,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_Accessibility",
+    "Win32_UI_Controls_Dialogs",
 ] }
 
 [profile.release]

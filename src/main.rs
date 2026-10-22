@@ -25,6 +25,7 @@ const PREVIEW_COLOR: egui::Color32 = egui::Color32::from_rgb(46, 160, 67);
 const AIR_COLOR: egui::Color32 = egui::Color32::from_rgb(218, 54, 51);
 const CARD_W: f32 = 220.0;
 const CARD_HEADER: f32 = 30.0;
+const NO_DATASHOW: &str = "O datashow não está conectado (ou é a mesma tela do painel). Nada foi coberto.";
 
 /// O que fica salvo entre uma abertura e outra.
 #[derive(Serialize, Deserialize, Default)]
@@ -35,7 +36,13 @@ struct Config {
     /// A proteção do datashow vem ligada; isto só fica true se o operador desligar.
     #[serde(default)]
     protection_off: bool,
+    /// Imagem mostrada no datashow quando nada está no ar (`None` = tela preta).
+    #[serde(default)]
+    standby_image: Option<String>,
 }
+
+/// Maior imagem de espera guardada na memória: datashow 4K.
+const STANDBY_MAX: (u32, u32) = (3840, 2160);
 
 /// Onde cada miniatura do Windows deve ser desenhada neste quadro.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,6 +59,8 @@ struct App {
     monitors: Vec<Monitor>,
     datashow: usize,
     windows: Vec<WindowInfo>,
+    /// Janelas na ordem em que apareceram: os cartões não trocam de lugar quando o foco muda.
+    order: Vec<Hwnd>,
     icons: HashMap<Hwnd, Option<egui::TextureHandle>>,
     last_refresh: Instant,
     preview: Option<Hwnd>,
@@ -61,6 +70,10 @@ struct App {
     /// Áreas (em pixels físicos) e recorte de cada miniatura, montados durante o desenho da tela.
     placed: Vec<(Slot, win::Rect, win::Rect)>,
     status: String,
+    /// Título e programa do cartão sob o mouse, mostrados na barra de status.
+    hovered_card: Option<String>,
+    /// Alguma dica (tooltip) está aberta: as miniaturas, que ficam por cima de tudo, se escondem.
+    tip_open: bool,
 }
 
 impl App {
@@ -76,6 +89,7 @@ impl App {
             monitors: Vec::new(),
             datashow: 0,
             windows: Vec::new(),
+            order: Vec::new(),
             icons: HashMap::new(),
             last_refresh: Instant::now() - REFRESH,
             preview: None,
@@ -84,9 +98,55 @@ impl App {
             thumbs: HashMap::new(),
             placed: Vec::new(),
             status: String::new(),
+            hovered_card: None,
+            tip_open: false,
         };
+        if let Some(title) = win::recover_previous() {
+            app.status = format!("\"{title}\" tinha ficado no datashow quando o TakeScreen fechou e foi devolvida para a tela 1.");
+        }
         app.refresh_monitors();
+        app.apply_standby();
         app
+    }
+
+    /// Carrega a imagem de espera escolhida; se não der, avisa e fica a tela preta.
+    fn apply_standby(&mut self) {
+        let Some(path) = self.cfg.standby_image.clone() else {
+            win::set_standby(self.curtain, None);
+            return;
+        };
+        match load_standby(&path) {
+            Ok(img) => win::set_standby(self.curtain, Some(img)),
+            Err(e) => {
+                win::set_standby(self.curtain, None);
+                let aviso = format!("Não consegui abrir a imagem de espera ({e}). O datashow fica com a tela preta.");
+                self.status = if self.status.is_empty() { aviso } else { format!("{} {aviso}", self.status) };
+            }
+        }
+    }
+
+    fn choose_standby(&mut self) {
+        let Some(path) = win::pick_image_file(self.me) else { return };
+        self.cfg.standby_image = Some(path);
+        self.status.clear();
+        self.apply_standby();
+        if self.status.is_empty() {
+            self.status = "Imagem de espera trocada.".into();
+        } else {
+            self.cfg.standby_image = None;
+        }
+    }
+
+    fn black_standby(&mut self) {
+        self.cfg.standby_image = None;
+        self.apply_standby();
+        self.status = "Imagem de espera: tela preta.".into();
+    }
+
+    /// O datashow é uma tela separada: há 2 monitores ou mais e o painel não está nele.
+    fn datashow_separate(&self) -> bool {
+        let Some(ds) = self.datashow_monitor() else { return false };
+        self.monitors.len() >= 2 && !self.me.and_then(win::visible_rect).is_some_and(|r| ds.holds(&r))
     }
 
     fn datashow_monitor(&self) -> Option<&Monitor> {
@@ -137,10 +197,10 @@ impl App {
     /// O monitor para onde as janelas voltam: o do painel, ou o principal.
     fn home_monitor(&self) -> Option<&Monitor> {
         let ds = self.datashow_monitor()?;
-        let mine = self.me.and_then(win::window_rect);
+        let mine = self.me.and_then(win::visible_rect);
         let others = || self.monitors.iter().filter(|m| m.device != ds.device);
         others()
-            .find(|m| mine.is_some_and(|r| m.contains(&r)))
+            .find(|m| mine.is_some_and(|r| m.holds(&r)))
             .or_else(|| others().find(|m| m.primary))
             .or_else(|| others().next())
     }
@@ -148,17 +208,17 @@ impl App {
     /// Diz à proteção qual é o datashow e quais janelas podem estar nele.
     fn sync_guard(&self, entering: Option<Hwnd>) {
         let (Some(ds), Some(home)) = (self.datashow_monitor(), self.home_monitor()) else {
-            win::guard_configure(false, win::Rect::default(), win::Rect::default(), &[]);
+            win::guard_configure(false, win::Rect::default(), win::Rect::default(), &[], None);
             return;
         };
         let allowed: Vec<Hwnd> = self.on_air_hwnd().into_iter().chain(entering).collect();
-        win::guard_configure(!self.cfg.protection_off, ds.rect, home.work, &allowed);
+        win::guard_configure(!self.cfg.protection_off, ds.rect, home.work, &allowed, self.curtain);
     }
 
     /// Se a janela que saiu do ar tinha sido aberta no datashow, ela não volta para lá.
     fn send_off_datashow(&self, hwnd: Hwnd) {
         let (Some(ds), Some(home)) = (self.datashow_monitor(), self.home_monitor()) else { return };
-        if win::window_rect(hwnd).is_some_and(|r| ds.contains(&r)) {
+        if win::visible_rect(hwnd).is_some_and(|r| ds.holds(&r)) {
             win::send_home(hwnd, home.work);
         }
     }
@@ -174,8 +234,8 @@ impl App {
     /// O painel nunca deve aparecer no datashow.
     fn keep_me_off_datashow(&self) {
         let (Some(me), Some(ds)) = (self.me, self.datashow_monitor()) else { return };
-        let Some(r) = win::window_rect(me) else { return };
-        if ds.contains(&r) {
+        let Some(r) = win::visible_rect(me) else { return };
+        if ds.holds(&r) {
             if let Some(other) = self.monitors.iter().find(|m| m.device != ds.device) {
                 win::move_window(me, other.rect.left + 40, other.rect.top + 40);
             }
@@ -184,10 +244,15 @@ impl App {
 
     fn refresh_windows(&mut self, ctx: &egui::Context) {
         self.windows = win::list_windows();
+        let alive: Vec<Hwnd> = self.windows.iter().map(|w| w.hwnd).collect();
+        track_order(&mut self.order, &alive);
+        let order = &self.order;
+        self.windows.sort_by_key(|w| order.iter().position(|h| *h == w.hwnd));
         if let Some(s) = self.on_air {
             if !s.hwnd.exists() {
                 // A janela no ar foi fechada: a cortina preta já está logo atrás dela.
                 self.on_air = None;
+                win::remember_on_air(None);
                 self.status = "A janela que estava no ar foi fechada. O datashow está preto.".into();
             }
         }
@@ -195,7 +260,6 @@ impl App {
             self.preview = None;
         }
 
-        let alive: Vec<Hwnd> = self.windows.iter().map(|w| w.hwnd).collect();
         self.icons.retain(|h, _| alive.contains(h));
         for w in &self.windows {
             self.icons.entry(w.hwnd).or_insert_with(|| {
@@ -226,9 +290,8 @@ impl App {
         if self.on_air_hwnd() == Some(target) {
             return;
         }
-        let me_there = self.me.and_then(win::window_rect).is_some_and(|r| ds.contains(&r));
-        if self.monitors.len() < 2 || me_there {
-            self.status = "O datashow não está conectado (ou é a mesma tela do painel).".into();
+        if !self.datashow_separate() {
+            self.status = NO_DATASHOW.into();
             return;
         }
         self.sync_guard(Some(target));
@@ -237,6 +300,7 @@ impl App {
             self.status = "Não consegui mover essa janela. Ela ainda está aberta?".into();
             return;
         };
+        win::remember_on_air(Some(&saved));
         if let Some(old) = self.on_air.replace(saved) {
             win::restore(&old);
             self.send_off_datashow(old.hwnd);
@@ -250,13 +314,19 @@ impl App {
 
     /// LIMPAR: cortina preta na frente e a janela volta para a tela 1.
     fn clear(&mut self) {
-        if let (Some(c), Some(ds)) = (self.curtain, self.datashow_monitor()) {
+        let separate = self.datashow_separate();
+        // Com um monitor só, a cortina cobriria o próprio painel.
+        if let (true, Some(c), Some(ds)) = (separate, self.curtain, self.datashow_monitor()) {
             win::place_curtain(c, ds.rect, true);
         }
         if let Some(old) = self.on_air.take() {
+            win::remember_on_air(None);
             win::restore(&old);
             self.send_off_datashow(old.hwnd);
-            self.status = "Datashow limpo (tela preta).".into();
+            self.status = "Datashow limpo.".into();
+        }
+        if !separate {
+            self.status = NO_DATASHOW.into();
         }
         self.sync_guard(None);
         if let Some(me) = self.me {
@@ -323,9 +393,20 @@ impl App {
             self.set_datashow(chosen);
             ui.add_space(16.0);
             let mut protect = !self.cfg.protection_off;
-            ui.checkbox(&mut protect, "Proteger datashow")
-                .on_hover_text("Qualquer janela que abrir na tela 2 sem passar pelo TakeScreen volta na hora para a tela 1.");
+            let r = ui.checkbox(&mut protect, "Proteger datashow").on_hover_text(
+                "Qualquer janela que abrir na tela 2 sem passar pelo TakeScreen volta na hora para a tela 1. \
+                 Apresentações do PowerPoint vão para a PRÉVIA.",
+            );
+            self.tip_open |= r.hovered() || r.is_tooltip_open();
             self.cfg.protection_off = !protect;
+            ui.add_space(16.0);
+            ui.label("Espera:");
+            if ui.button("Escolher imagem").clicked() {
+                self.choose_standby();
+            }
+            if ui.add_enabled(self.cfg.standby_image.is_some(), egui::Button::new("Usar tela preta")).clicked() {
+                self.black_standby();
+            }
             if self.monitors.len() < 2 {
                 ui.colored_label(AIR_COLOR, "Só um monitor conectado. Ligue o datashow.");
             }
@@ -417,6 +498,9 @@ impl App {
                 ui.horizontal(|ui| {
                     for w in row {
                         let r = self.card(ui, w, clip);
+                        if r.hovered() {
+                            self.hovered_card = Some(format!("{}  ({})", w.title, w.exe));
+                        }
                         if r.clicked() {
                             clicked = Some(w.hwnd);
                         }
@@ -492,10 +576,17 @@ impl App {
         } else {
             self.placed.push((Slot::Card(w.hwnd), to_px(thumb, ui.ctx()), clip));
         }
-        resp.on_hover_text(format!("{}\n{}", w.title, w.exe))
+        // Sem dica flutuante: a miniatura do Windows ficaria por cima dela. Título e programa vão para a barra de status.
+        resp
     }
 
     fn keyboard(&mut self, ctx: &egui::Context) {
+        // Com um menu aberto (lista de monitores), Esc e Enter são dele, não do datashow.
+        // O `ctx.any_popup_open()` só conhece os menus depois que a tela é desenhada, e o
+        // teclado é lido antes disso. A memória do egui guarda o menu aberto entre um quadro e outro.
+        if egui::Popup::is_any_open(ctx) {
+            return;
+        }
         let (enter, esc, back, next) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Enter),
@@ -575,6 +666,19 @@ impl eframe::App for App {
         if let Some(title) = win::guard_take_returned().pop() {
             self.status = format!("\"{title}\" abriu no datashow e foi devolvida para a tela 1.");
         }
+        for h in win::guard_take_arrived() {
+            if !h.exists() {
+                continue;
+            }
+            if !self.windows.iter().any(|w| w.hwnd == h) {
+                self.refresh_windows(&ctx);
+            }
+            self.select(h);
+            self.status = format!("A apresentação {} abriu no datashow e está na PRÉVIA. Aperte EXIBIR para mostrar.", self.title_of(h));
+        }
+        // O cartão sob o mouse é medido durante o desenho; mostra o do quadro anterior.
+        let hovered = self.hovered_card.take();
+        self.tip_open = false;
 
         egui::Panel::top("barra").show(ui, |ui| {
             ui.add_space(4.0);
@@ -582,7 +686,12 @@ impl eframe::App for App {
             ui.add_space(2.0);
         });
         egui::Panel::bottom("status").show(ui, |ui| {
-            ui.label(if self.status.is_empty() { "Pronto." } else { &self.status });
+            let text = match &hovered {
+                Some(h) => h.as_str(),
+                None if self.status.is_empty() => "Pronto.",
+                None => &self.status,
+            };
+            ui.add(egui::Label::new(text).truncate());
         });
         egui::CentralPanel::default().show(ui, |ui| {
             let studio_h = (ui.available_height() * 0.55).max(220.0);
@@ -592,7 +701,7 @@ impl eframe::App for App {
             self.programs(ui);
         });
 
-        self.apply_thumbnails(ctx.any_popup_open());
+        self.apply_thumbnails(ctx.any_popup_open() || self.tip_open);
         ctx.request_repaint_after(REFRESH);
     }
 
@@ -602,17 +711,48 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.thumbs.clear();
-        win::guard_configure(false, win::Rect::default(), win::Rect::default(), &[]);
+        win::guard_configure(false, win::Rect::default(), win::Rect::default(), &[], None);
         if let Some(old) = self.on_air.take() {
             win::restore(&old);
         }
+        win::remember_on_air(None);
         if let Some(c) = self.curtain.take() {
             win::destroy(c);
         }
     }
 }
 
+/// Junta à `order` as janelas novas (no fim) e tira as que fecharam.
+fn track_order(order: &mut Vec<Hwnd>, alive: &[Hwnd]) {
+    order.retain(|h| alive.contains(h));
+    for h in alive {
+        if !order.contains(h) {
+            order.push(*h);
+        }
+    }
+}
+
+/// Abre a imagem de espera (PNG ou JPEG), reduz para caber em 3840x2160 mantendo a
+/// proporção e devolve o tamanho e os pixels em RGBA, de cima para baixo.
+fn load_standby(path: &str) -> Result<([usize; 2], Vec<u8>), String> {
+    let img = image::open(path).map_err(|e| e.to_string())?;
+    let (max_w, max_h) = STANDBY_MAX;
+    let img = if img.width() > max_w || img.height() > max_h {
+        img.resize(max_w, max_h, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let rgba = img.into_rgba8();
+    Ok(([rgba.width() as usize, rgba.height() as usize], rgba.into_raw()))
+}
+
 fn main() -> eframe::Result {
+    // Se o programa der erro, a janela no ar volta para a tela 1 antes de fechar.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        win::recover_now();
+        default_hook(info);
+    }));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("TakeScreen")
@@ -621,4 +761,37 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("TakeScreen", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cartoes_ficam_na_ordem_de_chegada() {
+        let (a, b, c, d) = (Hwnd(1), Hwnd(2), Hwnd(3), Hwnd(4));
+        let mut order = Vec::new();
+        track_order(&mut order, &[b, a, c]);
+        assert_eq!(order, [b, a, c]);
+        // O foco mudou (a lista do Windows vem em outra ordem), b fechou e d abriu.
+        track_order(&mut order, &[d, c, a]);
+        assert_eq!(order, [a, c, d]);
+    }
+
+    #[test]
+    fn imagem_de_espera_grande_e_reduzida_mantendo_a_proporcao() {
+        let path = std::env::temp_dir().join(format!("takescreen-teste-{}.png", std::process::id()));
+        image::RgbaImage::from_pixel(5000, 1000, image::Rgba([10, 20, 30, 255])).save(&path).unwrap();
+        let loaded = load_standby(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        let ([w, h], rgba) = loaded.unwrap();
+        assert_eq!((w, h), (3840, 768));
+        assert_eq!(rgba.len(), w * h * 4);
+        assert_eq!(&rgba[..4], &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn imagem_de_espera_invalida_vira_erro() {
+        assert!(load_standby(r"C:\nao\existe\takescreen.png").is_err());
+    }
 }
