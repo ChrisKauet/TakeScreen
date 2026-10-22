@@ -18,7 +18,7 @@ Painel do operador para escolher o que aparece no datashow (segunda tela), no es
 
 ## Baixar
 
-Baixe o `TakeScreen.exe` em **Releases** e abra. É portátil: um arquivo só, sem instalar nada (nem o Visual C++ Redistributable). As preferências ficam salvas no próprio usuário do Windows.
+**[Baixar o TakeScreen.exe (versão mais nova)](https://github.com/ChrisKauet/TakeScreen/releases/latest/download/TakeScreen.exe)**, ou escolha uma versão em [Releases](https://github.com/ChrisKauet/TakeScreen/releases), e abra. É portátil: um arquivo só, sem instalar nada (nem o Visual C++ Redistributable). As preferências ficam salvas no próprio usuário do Windows.
 
 Cada envio para a branch `main` gera o `TakeScreen.exe` na aba **Actions** do GitHub (em *Artifacts*). Para publicar uma versão em **Releases**, crie uma tag começando com `v`:
 
