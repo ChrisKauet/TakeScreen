@@ -1,49 +1,172 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Logo do TakeScreen" width="112">
+<img src="assets/logo.svg" alt="Logo do TakeScreen / TakeScreen logo" width="112">
 
 # TakeScreen
 
-**Painel do operador para escolher o que aparece no datashow (segunda tela), no estilo do Modo Estúdio do OBS.**
+**Painel do operador para escolher o que aparece no datashow (segunda tela), no estilo do Modo Estúdio do OBS.**<br>
+**Operator panel to choose what shows on the projector (second screen), in the style of OBS Studio Mode.**
 
-[![Versão](https://img.shields.io/github/v/release/ChrisKauet/TakeScreen?label=vers%C3%A3o&color=2ea043)](https://github.com/ChrisKauet/TakeScreen/releases/latest)
+[![Versão / Version](https://img.shields.io/github/v/release/ChrisKauet/TakeScreen?label=vers%C3%A3o%20%2F%20version&color=2ea043)](https://github.com/ChrisKauet/TakeScreen/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/ChrisKauet/TakeScreen/total?label=downloads&color=0969da)](https://github.com/ChrisKauet/TakeScreen/releases)
-[![Windows 10 e 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)](#-download)
-[![Feito em Rust](https://img.shields.io/badge/feito%20em-Rust-b7410e?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Licença](https://img.shields.io/github/license/ChrisKauet/TakeScreen?label=licen%C3%A7a)](LICENSE)
+[![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)](#-english)
+[![Rust](https://img.shields.io/badge/Rust-b7410e?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Licença / License](https://img.shields.io/github/license/ChrisKauet/TakeScreen?label=licen%C3%A7a%20%2F%20license)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/ChrisKauet/TakeScreen/build.yml?label=build)](https://github.com/ChrisKauet/TakeScreen/actions/workflows/build.yml)
 
 <br>
 
-[![Baixar para Windows](https://img.shields.io/badge/Baixar%20para%20Windows-TakeScreen.zip-da3633?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/ChrisKauet/TakeScreen/releases/latest/download/TakeScreen-windows-x64.zip)
+[![Baixar para Windows / Download for Windows](https://img.shields.io/badge/Baixar%20para%20Windows%20%2F%20Download%20for%20Windows-TakeScreen.zip-da3633?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/ChrisKauet/TakeScreen/releases/latest/download/TakeScreen-windows-x64.zip)
 
-<sub>Versão mais nova, portátil, sem instalar nada · <a href="https://github.com/ChrisKauet/TakeScreen/releases">todas as versões</a></sub>
+<sub>Versão mais nova, portátil, sem instalar nada · <a href="https://github.com/ChrisKauet/TakeScreen/releases">todas as versões</a></sub><br>
+<sub>Latest version, portable, nothing to install · <a href="https://github.com/ChrisKauet/TakeScreen/releases">all releases</a></sub>
 
 <br><br>
 
-<img src="assets/interface.svg" alt="Ilustração da interface do TakeScreen: PRÉVIA e NO AR em cima, programas abertos embaixo" width="100%">
+<img src="assets/interface.svg" alt="Ilustração da interface do TakeScreen: PRÉVIA e NO AR em cima, programas abertos embaixo / TakeScreen interface illustration: preview and on air on top, open programs below" width="100%">
 
-<sub>Ilustração da interface</sub>
+<sub>Ilustração da interface / Interface illustration</sub>
+
+<br><br>
+
+🇺🇸 [English](#-english) · 🇧🇷 [Português](#-português)
 
 </div>
 
 ---
 
+## 🇺🇸 English
+
+TakeScreen lets the person running the screen at a church service, class or event pick which window goes to the projector, without the audience ever seeing the desktop, a taskbar or a window being dragged. It works like OBS Studio Mode: you set up the **PRÉVIA** (preview), then press **EXIBIR** (show) to put it **NO AR** (on air).
+
+> [!NOTE]
+> The interface is in Portuguese. This section uses the Portuguese button names, with the English meaning next to them.
+
+**Requirements:** Windows 10 or 11 (64-bit) and two displays (the panel on one, the projector on the other).
+
+### 📥 Download
+
+| System | File | Link |
+|---|---|---|
+| Windows 10 and 11 (64-bit) | `TakeScreen-windows-x64.zip` (portable) | [**Download**](https://github.com/ChrisKauet/TakeScreen/releases/latest/download/TakeScreen-windows-x64.zip) |
+| Older versions | every published version | [Releases](https://github.com/ChrisKauet/TakeScreen/releases) |
+
+**Get started in 3 steps:**
+
+1. **Download** `TakeScreen-windows-x64.zip` from the table above.
+2. **Extract** the zip. You get a `TakeScreen` folder with `TakeScreen.exe`, `LICENSE` and `LEIA-ME.txt`.
+3. **Open** `TakeScreen.exe` and pick the projector in the top bar (*Datashow*).
+
+> [!TIP]
+> It is portable: nothing to install (not even the Visual C++ Redistributable). Settings are saved in your Windows user profile.
+
+### ✨ Features
+
+| | Feature | How it works |
+|:-:|---|---|
+| 🎬 | **PRÉVIA and NO AR** (preview and on air) | Live images of the windows, drawn by Windows itself. Preview is green, on air is red. |
+| 🗂️ | **Open programs** | Cards with the icon and a live preview: click to send to the preview, double-click to show right away. Cards keep the order the programs opened in. |
+| ▶️ | **EXIBIR** (show, or Enter) | The preview window is placed on the projector *behind* the one on air and only then comes to the front. The audience sees only the switch. The window that was on air goes back to screen 1 as it was. |
+| ⬛ | **Limpar datashow** (clear, or Esc) | Covers the projector with the standby image (or black). With a menu open, Esc only closes the menu. |
+| 🖼️ | **Standby image** | Under *Espera*, **Escolher imagem** (PNG or JPEG) sets what the audience sees when nothing is on air, centered and undistorted. **Usar tela preta** goes back to black. |
+| 🔲 | **Program fullscreen** (F11) | Presses F11 in the window on air (Chrome, Photos). |
+| 🛡️ | **Proteger datashow** (protect, on by default) | Any window that opens or is dragged onto screen 2 without going through TakeScreen goes straight back to screen 1. |
+| 📊 | **PowerPoint shows** | When PowerPoint opens the slideshow directly on the projector, it stays hidden behind the curtain and appears in the preview. Press EXIBIR to show it. |
+| ♻️ | **Crash recovery** | If TakeScreen closes with a window on air, that window goes back to screen 1 as it was, right away or on the next start. |
+| 🔌 | **Projector remembered by name** | The projector is remembered by its device name, so it stays right if the display order changes. |
+| 📋 | **Queue** | In the side bar (button **☰ Fila, mídia e mixer**), build the running order: the preview window, a file or a link. **Próximo ▶** (next, or PageDown) puts the next window in the preview, or shows it right away if *Próximo já exibe* is checked. Files and links open in their default program. **Reiniciar** (restart) goes back to the start. The queue is saved. |
+| ⏯️ | **Media** | Lists what is playing (Chrome and Edge tabs, Spotify, Movies & TV, VLC) with previous, play/pause and next, without bringing the player to the front or showing its controls on the projector. For players not on the list, **Tocar/pausar a janela NO AR** toggles the window on air. |
+| 🎞️ | **VLC without HUD** | **Abrir vídeo no VLC (sem HUD)** opens a file fullscreen with no control bar, title or messages. Needs VLC installed. |
+| 🎚️ | **Mixer** | Master volume plus one control per program (volume, mute and sound level), without opening the Windows mixer. Browsers have a single control for all their tabs. |
+
+### ⚡ Shortcuts
+
+| Key or action | What it does |
+|---|---|
+| <kbd>Enter</kbd> | EXIBIR: puts the preview on air |
+| <kbd>Esc</kbd> | Clear the projector (with a menu open, only closes the menu) |
+| <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | Picks the previous or next program for the preview |
+| <kbd>PageDown</kbd> | Next item in the queue |
+| Double-click a card | Shows it right away |
+
+### 💡 Tips
+
+- On Windows 11, turn off "Show my taskbar on all displays" (Settings > Personalization > Taskbar) so the taskbar does not show on the projector.
+
+### ❓ FAQ
+
+<details>
+<summary><b>Windows said "Windows protected your PC". Is it safe?</b></summary>
+
+<br>
+
+The warning shows because `TakeScreen.exe` has no paid code signature. Click **More info**, then **Run anyway**. The code is open and the exe is built by GitHub from this repository: every build can be checked in the [Actions](https://github.com/ChrisKauet/TakeScreen/actions/workflows/build.yml) tab.
+
+</details>
+
+<details>
+<summary><b>Does it need to be installed?</b></summary>
+
+<br>
+
+No. TakeScreen is portable: extract the zip and open the exe. It even runs from a USB drive.
+
+</details>
+
+<details>
+<summary><b>Where are the settings stored?</b></summary>
+
+<br>
+
+In your Windows user profile, at `%APPDATA%\TakeScreen` (chosen projector, protection, standby image and queue). To reset, close TakeScreen and delete that folder.
+
+</details>
+
+<details>
+<summary><b>Does it work with a single display?</b></summary>
+
+<br>
+
+It opens, but EXIBIR and clear do nothing, since they would cover the panel itself. The status bar tells you. Connect the projector and pick it in the top bar.
+
+</details>
+
+<details>
+<summary><b>PowerPoint opened the slideshow straight on the projector. Now what?</b></summary>
+
+<br>
+
+With **Proteger datashow** on, the slideshow stays hidden behind the curtain and already shows in the preview. Press **EXIBIR** (or Enter) when you want to show it.
+
+</details>
+
+### 🤝 Contributing
+
+[Issues](https://github.com/ChrisKauet/TakeScreen/issues) and [pull requests](https://github.com/ChrisKauet/TakeScreen/pulls) are welcome. Fork the repository, build with `cargo build`, run the tests with `cargo test` and open a pull request explaining what changed. Build details are in [Compilar e publicar / Build and release](#-compilar-e-publicar--build-and-release).
+
+### 📄 License
+
+Released under the [MIT](LICENSE) license.
+
+---
+
+## 🇧🇷 Português
+
 **Requisitos:** Windows 10 ou 11 (64 bits) e dois monitores (o painel numa tela e o datashow na outra).
 
-## 📑 Índice
+### 📑 Índice
 
-- [Download](#-download)
+- [Baixar](#-baixar)
 - [Funcionalidades](#-funcionalidades)
 - [Atalhos](#-atalhos)
 - [Ajuste da janela](#-ajuste-da-janela)
 - [Dicas](#-dicas)
 - [Perguntas frequentes](#-perguntas-frequentes)
-- [Compilar e publicar](#-compilar-e-publicar)
 - [Contribuir](#-contribuir)
 - [Licença](#-licença)
+- [Compilar e publicar](#-compilar-e-publicar--build-and-release)
 
-## 📥 Download
+### 📥 Baixar
 
 | Sistema | Arquivo | Link |
 |---|---|---|
@@ -59,7 +182,7 @@
 > [!TIP]
 > É portátil: não precisa instalar nada (nem o Visual C++ Redistributable). As preferências ficam salvas no próprio usuário do Windows.
 
-## ✨ Funcionalidades
+### ✨ Funcionalidades
 
 | | Função | Como funciona |
 |:-:|---|---|
@@ -79,7 +202,7 @@
 | 🎞️ | **Vídeo no VLC sem HUD** | **Abrir vídeo no VLC (sem HUD)** abre o arquivo em tela cheia sem barra de controles, título nem avisos. A janela volta para a tela 1 pela proteção; escolha ela e aperte EXIBIR. Precisa do VLC instalado. |
 | 🎚️ | **Mixer** | Volume geral e um controle por programa (volume, mudo e nível do som), sem abrir o mixer do Windows. |
 
-## ⚡ Atalhos
+### ⚡ Atalhos
 
 | Tecla ou ação | O que faz |
 |---|---|
@@ -90,16 +213,16 @@
 | Clique duplo no cartão | Exibe direto, sem esperar o EXIBIR |
 | Botão **Tela cheia do programa (F11)** | Aperta <kbd>F11</kbd> na janela que está no ar |
 
-## 🪟 Ajuste da janela
+### 🪟 Ajuste da janela
 
 - *Tela inteira sem bordas*: tira a barra de título e ocupa o monitor todo. Padrão para programas comuns (PowerPoint, Chrome).
 - *Maximizar*: padrão para apps da Microsoft Store (Fotos, Filmes e TV), que desenham a própria moldura.
 
-## 💡 Dicas
+### 💡 Dicas
 
 - No Windows 11, desligue "Mostrar a barra de tarefas em todos os monitores" (Configurações > Personalização > Barra de tarefas) para a barra não aparecer no datashow.
 
-## ❓ Perguntas frequentes
+### ❓ Perguntas frequentes
 
 <details>
 <summary><b>O Windows mostrou "O Windows protegeu o computador". É seguro?</b></summary>
@@ -173,54 +296,7 @@ Instale o VLC pelo site oficial, [videolan.org](https://www.videolan.org). O Tak
 
 </details>
 
-## 🔧 Compilar e publicar
-
-<details>
-<summary><b>Compilar no Windows</b></summary>
-
-<br>
-
-Com Rust instalado:
-
-```
-cargo build --release
-```
-
-O programa sai em `target/release/TakeScreen.exe`.
-
-</details>
-
-<details>
-<summary><b>Compilar no Linux (gerando o .exe para Windows)</b></summary>
-
-<br>
-
-Precisa do `gcc-mingw-w64-x86-64`:
-
-```
-rustup target add x86_64-pc-windows-gnu
-cargo build --release --target x86_64-pc-windows-gnu
-```
-
-O programa sai em `target/x86_64-pc-windows-gnu/release/TakeScreen.exe`.
-
-</details>
-
-<details>
-<summary><b>Publicar uma versão</b></summary>
-
-<br>
-
-Cada envio para a branch `main` gera o `TakeScreen-windows-x64.zip` na aba **Actions** do GitHub (em *Artifacts*). Uma tag começando com `v` publica o zip em **Releases**:
-
-```
-git tag v0.3.0
-git push origin v0.3.0
-```
-
-</details>
-
-## 🤝 Contribuir
+### 🤝 Contribuir
 
 [Issues](https://github.com/ChrisKauet/TakeScreen/issues) e [pull requests](https://github.com/ChrisKauet/TakeScreen/pulls) são bem-vindos.
 
@@ -229,16 +305,57 @@ git push origin v0.3.0
 3. Rode os testes com `cargo test`.
 4. Abra um pull request explicando o que mudou.
 
-## 📄 Licença
+### 📄 Licença
 
 Distribuído sob a licença [MIT](LICENSE).
 
 ---
 
+## 🔧 Compilar e publicar / Build and release
+
+<details>
+<summary><b>Compilar / Build</b></summary>
+
+<br>
+
+Com Rust instalado, no Windows o programa sai em `target/release/TakeScreen.exe`.<br>
+With Rust installed, on Windows the program is built to `target/release/TakeScreen.exe`.
+
+```
+cargo build --release
+```
+
+No Linux, gerando o .exe para Windows (precisa do `gcc-mingw-w64-x86-64`), ele sai em `target/x86_64-pc-windows-gnu/release/TakeScreen.exe`.<br>
+On Linux, cross-compiling the Windows .exe (needs `gcc-mingw-w64-x86-64`), it is built to `target/x86_64-pc-windows-gnu/release/TakeScreen.exe`.
+
+```
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+</details>
+
+<details>
+<summary><b>Publicar / Release</b></summary>
+
+<br>
+
+Cada envio para a branch `main` gera o `TakeScreen-windows-x64.zip` na aba **Actions** (em *Artifacts*); uma tag começando com `v` publica o zip em **Releases**.<br>
+Every push to `main` builds `TakeScreen-windows-x64.zip` in the **Actions** tab (under *Artifacts*); a tag starting with `v` publishes the zip to **Releases**.
+
+```
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+</details>
+
+---
+
 <div align="center">
 
-Feito para quem opera o telão em eventos.
+Feito para quem opera o telão em eventos / Made for people who run the screen at events
 
-<a href="#takescreen">Voltar ao topo ⬆</a>
+<a href="#takescreen">Voltar ao topo / Back to top ⬆</a>
 
 </div>
