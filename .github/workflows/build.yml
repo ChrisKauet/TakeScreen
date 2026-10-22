@@ -19,12 +19,47 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Compilar
         run: cargo build --release --locked
+      - name: Empacotar
+        shell: pwsh
+        run: |
+          $dist = Join-Path $PWD 'dist'
+          $package = Join-Path $dist 'TakeScreen'
+          if (Test-Path $dist) {
+            Remove-Item $dist -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+          Copy-Item 'target/release/TakeScreen.exe' (Join-Path $package 'TakeScreen.exe')
+          Copy-Item 'LICENSE' (Join-Path $package 'LICENSE')
+          $readme = @'
+          TakeScreen
+
+          Painel portátil para escolher o que aparece no datashow.
+
+          Como usar:
+          1. Extraia a pasta.
+          2. Abra o TakeScreen.exe.
+          3. Escolha o datashow no topo.
+
+          O TakeScreen é portátil: não instala nada.
+          No Windows 11, desligue "Mostrar a barra de tarefas em todos os monitores" para a barra não aparecer no datashow.
+
+          https://github.com/ChrisKauet/TakeScreen
+          '@
+          $utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
+          [System.IO.File]::WriteAllText((Join-Path $package 'LEIA-ME.txt'), $readme, $utf8Bom)
+          Compress-Archive -Path $package -DestinationPath (Join-Path $dist 'TakeScreen-windows-x64.zip') -Force
       - uses: actions/upload-artifact@v4
         with:
           name: TakeScreen
-          path: target/release/TakeScreen.exe
+          path: dist/TakeScreen-windows-x64.zip
       - name: Publicar versão
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/TakeScreen.exe
+          files: dist/TakeScreen-windows-x64.zip
+          name: TakeScreen ${{ github.ref_name }}
+          body: |
+            Baixe o TakeScreen em:
+            https://github.com/ChrisKauet/TakeScreen/releases/latest/download/TakeScreen-windows-x64.zip
+
+            Extraia e abra o TakeScreen.exe. Não precisa instalar nada.
