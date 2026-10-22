@@ -2,7 +2,7 @@
 name = "takescreen"
 version = "0.3.0"
 edition = "2021"
-description = "Painel de operador para controlar o que aparece no datashow (segunda tela)"
+description = "Control panel for live presentations: preview, go live, media, queue and volume on an external screen"
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "persistence"] }
