@@ -9,7 +9,10 @@
 #[cfg(not(windows))]
 compile_error!("O TakeScreen só funciona no Windows. Compile com --target x86_64-pc-windows-gnu ou no próprio Windows.");
 
+mod queue;
 mod win;
+mod media;
+mod mixer;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -39,7 +42,17 @@ struct Config {
     /// Imagem mostrada no datashow quando nada está no ar (`None` = tela preta).
     #[serde(default)]
     standby_image: Option<String>,
+    #[serde(default)]
+    queue: queue::Queue,
+    /// "Próximo" da fila já faz EXIBIR, sem parar na PRÉVIA.
+    #[serde(default)]
+    queue_take: bool,
+    #[serde(default)]
+    side_closed: bool,
 }
+
+/// Id do volume geral nos controles do mixer (as sessões de áudio têm ids do Windows).
+const MASTER_ID: &str = "";
 
 /// Maior imagem de espera guardada na memória: datashow 4K.
 const STANDBY_MAX: (u32, u32) = (3840, 2160);
@@ -74,6 +87,11 @@ struct App {
     hovered_card: Option<String>,
     /// Alguma dica (tooltip) está aberta: as miniaturas, que ficam por cima de tudo, se escondem.
     tip_open: bool,
+    media: media::Hub,
+    mixer: mixer::Hub,
+    /// Slider do mixer que o operador está mexendo: o valor lido do Windows não passa por cima dele.
+    vol_edit: Option<(String, f32, Instant)>,
+    url_input: String,
 }
 
 impl App {
@@ -100,6 +118,16 @@ impl App {
             status: String::new(),
             hovered_card: None,
             tip_open: false,
+            media: media::Hub::start({
+                let ctx = cc.egui_ctx.clone();
+                move || ctx.request_repaint()
+            }),
+            mixer: mixer::Hub::start({
+                let ctx = cc.egui_ctx.clone();
+                move || ctx.request_repaint()
+            }),
+            vol_edit: None,
+            url_input: String::new(),
         };
         if let Some(title) = win::recover_previous() {
             app.status = format!("\"{title}\" tinha ficado no datashow quando o TakeScreen fechou e foi devolvida para a tela 1.");
@@ -340,6 +368,54 @@ impl App {
         }
     }
 
+    /// Próximo da fila: janela vai para a PRÉVIA (e para o ar, se marcado); arquivo e link abrem no programa padrão.
+    fn queue_next(&mut self) {
+        let Some(item) = self.cfg.queue.next().cloned() else {
+            self.status = if self.cfg.queue.items.is_empty() {
+                "A fila está vazia.".into()
+            } else {
+                "Fim da fila. Clique em Reiniciar para começar de novo.".into()
+            };
+            return;
+        };
+        match &item.kind {
+            queue::Kind::Window(_) => match queue::find_window(&item, &self.windows).map(|w| w.hwnd) {
+                Some(h) => {
+                    self.select(h);
+                    self.status = format!("Na PRÉVIA: {}", item.label);
+                    if self.cfg.queue_take {
+                        self.take();
+                    }
+                }
+                None => self.status = format!("Não achei a janela \"{}\". Ela está aberta?", item.label),
+            },
+            queue::Kind::File(p) | queue::Kind::Url(p) => {
+                self.status = if win::open_path(p) {
+                    format!("Abrindo {}. Quando a janela aparecer, escolha e aperte EXIBIR.", item.label)
+                } else {
+                    format!("Não consegui abrir {}.", item.label)
+                };
+            }
+        }
+    }
+
+    fn queue_add(&mut self, label: String, kind: queue::Kind) {
+        self.status = format!("Na fila: {label}");
+        self.cfg.queue.add(queue::Item { label, kind });
+    }
+
+    fn open_vlc(&mut self) {
+        if media::find_vlc().is_none() {
+            self.status = "Não achei o VLC neste computador. Instale pelo site videolan.org.".into();
+            return;
+        }
+        let Some(file) = win::pick_media_file(self.me) else { return };
+        self.status = match media::open_in_vlc(&file, self.datashow as u32) {
+            Ok(()) => "VLC aberto sem os controles na tela. Escolha a janela dele e aperte EXIBIR.".into(),
+            Err(e) => format!("Não consegui abrir o VLC: {e}"),
+        };
+    }
+
     // -----------------------------------------------------------------------
     // Miniaturas ao vivo
 
@@ -407,6 +483,10 @@ impl App {
             if ui.add_enabled(self.cfg.standby_image.is_some(), egui::Button::new("Usar tela preta")).clicked() {
                 self.black_standby();
             }
+            ui.add_space(16.0);
+            let mut side = !self.cfg.side_closed;
+            ui.toggle_value(&mut side, "☰ Fila, mídia e mixer");
+            self.cfg.side_closed = !side;
             if self.monitors.len() < 2 {
                 ui.colored_label(AIR_COLOR, "Só um monitor conectado. Ligue o datashow.");
             }
@@ -420,8 +500,9 @@ impl App {
         ui.painter().rect_filled(rect, 4.0, egui::Color32::BLACK);
         ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(3.0, color), egui::StrokeKind::Outside);
         ui.add(egui::Label::new(egui::RichText::new(caption).weak()).truncate());
-        let full = to_px(ui.ctx().content_rect(), ui.ctx());
-        self.placed.push((slot, to_px(rect.shrink(1.0), ui.ctx()), full));
+        // Recorta no painel central: se a janela for estreita, a miniatura não invade a barra lateral.
+        let clip = to_px(ui.clip_rect(), ui.ctx());
+        self.placed.push((slot, to_px(rect.shrink(1.0), ui.ctx()), clip));
     }
 
     fn studio(&mut self, ui: &mut egui::Ui, max_height: f32) {
@@ -580,12 +661,204 @@ impl App {
         resp
     }
 
+    // -----------------------------------------------------------------------
+    // Barra lateral: fila, mídia e mixer
+
+    fn side_panel(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            egui::CollapsingHeader::new(egui::RichText::new("Fila").strong()).default_open(true).show(ui, |ui| self.queue_ui(ui));
+            egui::CollapsingHeader::new(egui::RichText::new("Mídia").strong()).default_open(true).show(ui, |ui| self.media_ui(ui));
+            egui::CollapsingHeader::new(egui::RichText::new("Mixer").strong()).default_open(true).show(ui, |ui| self.mixer_ui(ui));
+        });
+    }
+
+    fn queue_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let ready = !self.cfg.queue.items.is_empty();
+            let next = egui::Button::new(egui::RichText::new("Próximo ▶").strong().color(egui::Color32::WHITE))
+                .fill(if ready { PREVIEW_COLOR } else { egui::Color32::from_gray(60) });
+            if ui.add_enabled(ready, next).clicked() {
+                self.queue_next();
+            }
+            if ui.add_enabled(self.cfg.queue.pos.is_some(), egui::Button::new("Reiniciar")).clicked() {
+                self.cfg.queue.reset();
+                self.status = "Fila reiniciada: o Próximo volta ao primeiro item.".into();
+            }
+            ui.label(egui::RichText::new("PageDown").small().weak());
+        });
+        ui.checkbox(&mut self.cfg.queue_take, "Próximo já exibe (sem parar na PRÉVIA)");
+
+        if self.cfg.queue.items.is_empty() {
+            ui.label(egui::RichText::new("Fila vazia. Adicione a janela da PRÉVIA, um arquivo ou um link.").weak());
+        }
+        let pos = self.cfg.queue.pos;
+        let last = self.cfg.queue.items.len().saturating_sub(1);
+        let mut action: Option<(usize, i8)> = None;
+        for (i, item) in self.cfg.queue.items.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let icon = match item.kind {
+                    queue::Kind::Window(_) => "🗔",
+                    queue::Kind::File(_) => "📄",
+                    queue::Kind::Url(_) => "🌐",
+                };
+                let mut text = egui::RichText::new(format!("{}. {icon} {}", i + 1, item.label));
+                if pos == Some(i) {
+                    text = text.strong().color(PREVIEW_COLOR);
+                }
+                let buttons = 3.0 * 24.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2((ui.available_width() - buttons).max(40.0), 20.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| ui.add(egui::Label::new(text).truncate()),
+                );
+                if ui.add_enabled(i > 0, egui::Button::new("⏶").small()).clicked() {
+                    action = Some((i, -1));
+                }
+                if ui.add_enabled(i < last, egui::Button::new("⏷").small()).clicked() {
+                    action = Some((i, 1));
+                }
+                if ui.small_button("✖").clicked() {
+                    action = Some((i, 0));
+                }
+            });
+        }
+        match action {
+            Some((i, -1)) => self.cfg.queue.move_up(i),
+            Some((i, 1)) => self.cfg.queue.move_down(i),
+            Some((i, _)) => self.cfg.queue.remove(i),
+            None => {}
+        }
+
+        ui.horizontal(|ui| {
+            if ui.add_enabled(self.preview.is_some(), egui::Button::new("+ Janela da PRÉVIA")).clicked() {
+                if let Some(p) = self.preview {
+                    let title = self.title_of(p);
+                    self.queue_add(title.clone(), queue::Kind::Window(title));
+                }
+            }
+            if ui.button("+ Arquivo").clicked() {
+                if let Some(path) = win::pick_any_file(self.me) {
+                    let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
+                    self.queue_add(name, queue::Kind::File(path));
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            let field = ui.add(egui::TextEdit::singleline(&mut self.url_input).hint_text("https://...").desired_width(ui.available_width() - 70.0));
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button("+ Link").clicked() || enter {
+                match normalize_url(&self.url_input) {
+                    Some(url) => {
+                        self.queue_add(url.clone(), queue::Kind::Url(url));
+                        self.url_input.clear();
+                    }
+                    None => self.status = "Escreva um link sem espaços, como youtube.com/watch?v=...".into(),
+                }
+            }
+        });
+    }
+
+    fn media_ui(&mut self, ui: &mut egui::Ui) {
+        let sessions = self.media.sessions();
+        if sessions.is_empty() {
+            ui.label(egui::RichText::new("Nenhuma mídia tocando").weak());
+        }
+        for s in &sessions {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&s.app).strong());
+                let (state, color) = if s.playing { ("tocando", PREVIEW_COLOR) } else { ("pausado", ui.visuals().weak_text_color()) };
+                ui.label(egui::RichText::new(state).small().color(color));
+            });
+            let info = if s.artist.is_empty() { s.title.clone() } else { format!("{} · {}", s.title, s.artist) };
+            if !info.is_empty() {
+                ui.add(egui::Label::new(egui::RichText::new(info).weak()).truncate());
+            }
+            ui.horizontal(|ui| {
+                let cmds = [(s.can_prev, "⏮", media::MediaCmd::Prev), (s.can_toggle, "⏯", media::MediaCmd::Toggle), (s.can_next, "⏭", media::MediaCmd::Next)];
+                for (can, icon, cmd) in cmds {
+                    if ui.add_enabled(can, egui::Button::new(egui::RichText::new(icon).size(16.0)).min_size(egui::vec2(36.0, 24.0))).clicked() {
+                        self.media.send(&s.id, cmd);
+                    }
+                }
+            });
+            ui.separator();
+        }
+        // Players sem controle de mídia do Windows ainda entendem a tecla tocar/pausar enviada à janela.
+        if let Some(h) = self.on_air_hwnd() {
+            if ui.button("⏯ Tocar/pausar a janela NO AR").clicked() && !media::send_to_window(h, media::MediaCmd::Toggle) {
+                self.status = "Não consegui mandar tocar/pausar para a janela no ar.".into();
+            }
+        }
+        if ui.button("Abrir vídeo no VLC (sem HUD)").clicked() {
+            self.open_vlc();
+        }
+    }
+
+    fn mixer_ui(&mut self, ui: &mut egui::Ui) {
+        if self.vol_edit.as_ref().is_some_and(|e| e.2.elapsed() > Duration::from_millis(700)) {
+            self.vol_edit = None;
+        }
+        let (master, master_muted) = self.mixer.master();
+        self.volume_row(ui, MASTER_ID, "Volume geral", master, master_muted, None);
+        ui.separator();
+        let apps = self.mixer.apps();
+        if apps.is_empty() {
+            ui.label(egui::RichText::new("Nenhum programa com som agora.").weak());
+        }
+        for a in &apps {
+            self.volume_row(ui, &a.id, &a.name, a.volume, a.muted, Some(a.peak));
+        }
+        ui.label(egui::RichText::new("Navegadores têm um controle só para todas as abas.").small().weak());
+    }
+
+    /// Nome, botão mudo, slider de 0 a 100 e, para os programas, a barrinha de nível.
+    fn volume_row(&mut self, ui: &mut egui::Ui, id: &str, name: &str, volume: f32, muted: bool, peak: Option<f32>) {
+        ui.add(egui::Label::new(name).truncate());
+        ui.horizontal(|ui| {
+            let icon = if muted { "🔇" } else { "🔊" };
+            if ui.add(egui::Button::new(icon).selected(muted)).clicked() {
+                if id == MASTER_ID {
+                    self.mixer.set_master_mute(!muted);
+                } else {
+                    self.mixer.set_mute(id, !muted);
+                }
+            }
+            let mut v = match &self.vol_edit {
+                Some((e, v, _)) if e == id => *v,
+                _ => volume * 100.0,
+            };
+            ui.spacing_mut().slider_width = (ui.available_width() - 50.0).max(60.0);
+            let r = ui.add(egui::Slider::new(&mut v, 0.0..=100.0).fixed_decimals(0));
+            if r.changed() || r.dragged() {
+                self.vol_edit = Some((id.to_owned(), v, Instant::now()));
+            }
+            if r.changed() {
+                if id == MASTER_ID {
+                    self.mixer.set_master(v / 100.0);
+                } else {
+                    self.mixer.set_volume(id, v / 100.0);
+                }
+            }
+        });
+        if let Some(p) = peak {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+            let level = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * p.clamp(0.0, 1.0), rect.height()));
+            ui.painter().rect_filled(level, 2.0, PREVIEW_COLOR);
+        }
+        ui.add_space(4.0);
+    }
+
     fn keyboard(&mut self, ctx: &egui::Context) {
         // Com um menu aberto (lista de monitores), Esc e Enter são dele, não do datashow.
         // O `ctx.any_popup_open()` só conhece os menus depois que a tela é desenhada, e o
         // teclado é lido antes disso. A memória do egui guarda o menu aberto entre um quadro e outro.
-        if egui::Popup::is_any_open(ctx) {
+        // Digitando um link na fila: as teclas são do campo de texto.
+        if egui::Popup::is_any_open(ctx) || ctx.text_edit_focused() {
             return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
+            self.queue_next();
         }
         let (enter, esc, back, next) = ctx.input(|i| {
             (
@@ -693,6 +966,12 @@ impl eframe::App for App {
             };
             ui.add(egui::Label::new(text).truncate());
         });
+        // A barra lateral vem antes do painel central, que encolhe: as miniaturas do Windows nunca ficam por cima dela.
+        if !self.cfg.side_closed {
+            egui::Panel::right("lateral").resizable(true).default_size(260.0).size_range(220.0..=420.0).show(ui, |ui| {
+                self.side_panel(ui);
+            });
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             let studio_h = (ui.available_height() * 0.55).max(220.0);
             self.studio(ui, studio_h);
@@ -729,6 +1008,22 @@ fn track_order(order: &mut Vec<Hwnd>, alive: &[Hwnd]) {
         if !order.contains(h) {
             order.push(*h);
         }
+    }
+}
+
+/// Link digitado na fila: sem espaços, e só http/https (o Windows abriria qualquer programa).
+fn normalize_url(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.is_empty() || s.contains(char::is_whitespace) {
+        return None;
+    }
+    let lower = s.to_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        Some(s.to_owned())
+    } else if s.contains("://") {
+        None
+    } else {
+        Some(format!("https://{s}"))
     }
 }
 
@@ -788,6 +1083,15 @@ mod tests {
         assert_eq!((w, h), (3840, 768));
         assert_eq!(rgba.len(), w * h * 4);
         assert_eq!(&rgba[..4], &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn link_da_fila_vira_http() {
+        assert_eq!(normalize_url("  youtube.com/x "), Some("https://youtube.com/x".into()));
+        assert_eq!(normalize_url("HTTP://a.com"), Some("HTTP://a.com".into()));
+        assert_eq!(normalize_url("file://C:/x.exe"), None);
+        assert_eq!(normalize_url("a b.com"), None);
+        assert_eq!(normalize_url(""), None);
     }
 
     #[test]

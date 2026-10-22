@@ -13,6 +13,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Controls::Dialogs::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Identificador de janela que pode ser copiado e comparado livremente.
@@ -211,7 +212,28 @@ pub fn visible_rect(hwnd: Hwnd) -> Option<Rect> {
 
 /// Abre o seletor nativo para uma imagem de espera.
 pub fn pick_image_file(owner: Option<Hwnd>) -> Option<String> {
-    let filter = w!("Imagens (*.png;*.jpg;*.jpeg)\0*.png;*.jpg;*.jpeg\0\0");
+    pick_file(owner, w!("Imagens (*.png;*.jpg;*.jpeg)\0*.png;*.jpg;*.jpeg\0\0"))
+}
+
+pub fn pick_media_file(owner: Option<Hwnd>) -> Option<String> {
+    pick_file(
+        owner,
+        w!("Vídeo e áudio (*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.mp3;*.wav;*.flac)\0*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.mp3;*.wav;*.flac\0\0"),
+    )
+}
+
+pub fn pick_any_file(owner: Option<Hwnd>) -> Option<String> {
+    pick_file(owner, w!("Todos os arquivos (*.*)\0*.*\0\0"))
+}
+
+/// Abre um arquivo ou link com o programa padrão do Windows.
+pub fn open_path(path: &str) -> bool {
+    let path = windows::core::HSTRING::from(path);
+    let r = unsafe { ShellExecuteW(None, w!("open"), &path, None, None, SW_SHOWNORMAL) };
+    r.0 as isize > 32
+}
+
+fn pick_file(owner: Option<Hwnd>, filter: windows::core::PCWSTR) -> Option<String> {
     let mut file = [0u16; 32_768];
     let mut dialog = OPENFILENAMEW {
         lStructSize: size_of::<OPENFILENAMEW>() as u32,

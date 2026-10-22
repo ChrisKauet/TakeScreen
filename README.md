@@ -74,6 +74,10 @@
 | 🖥️ | **Um monitor só** | Sem datashow separado (ou com o painel na mesma tela), EXIBIR e Limpar não cobrem nada e a barra de status avisa. |
 | ♻️ | **Recuperação após travamento** | Se o TakeScreen fechar com uma janela no ar (erro no programa ou processo encerrado), ela volta para a tela 1 do jeito que estava, na hora ou na próxima abertura. |
 | 🔌 | **Datashow lembrado pelo nome** | O datashow é lembrado pelo nome do aparelho, então continua certo se a ordem dos monitores mudar. |
+| 📋 | **Fila** | Na barra lateral (botão **☰ Fila, mídia e mixer**), monte a sequência do culto: a janela da PRÉVIA, um arquivo ou um link. **Próximo ▶** (ou PageDown) põe a próxima janela na PRÉVIA, ou já exibe se *Próximo já exibe* estiver marcado; arquivos e links abrem no programa padrão. No fim da fila, **Reiniciar** volta ao começo. A fila fica salva. |
+| ⏯️ | **Mídia** | Lista o que está tocando (abas do Chrome e Edge, Spotify, Filmes e TV, VLC) com voltar, tocar/pausar e avançar, sem trazer o player para a frente e sem mostrar os controles dele no datashow. Para players que não aparecem na lista, **Tocar/pausar a janela NO AR**. |
+| 🎞️ | **Vídeo no VLC sem HUD** | **Abrir vídeo no VLC (sem HUD)** abre o arquivo em tela cheia sem barra de controles, título nem avisos. A janela volta para a tela 1 pela proteção; escolha ela e aperte EXIBIR. Precisa do VLC instalado. |
+| 🎚️ | **Mixer** | Volume geral e um controle por programa (volume, mudo e nível do som), sem abrir o mixer do Windows. |
 
 ## ⚡ Atalhos
 
@@ -82,6 +86,7 @@
 | <kbd>Enter</kbd> | EXIBIR: leva a PRÉVIA para o ar |
 | <kbd>Esc</kbd> | Limpar datashow (com um menu aberto, só fecha o menu) |
 | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | Escolhe o programa anterior ou o próximo para a PRÉVIA |
+| <kbd>PageDown</kbd> | Próximo item da fila (com um menu aberto ou digitando um link, não faz nada) |
 | Clique duplo no cartão | Exibe direto, sem esperar o EXIBIR |
 | Botão **Tela cheia do programa (F11)** | Aperta <kbd>F11</kbd> na janela que está no ar |
 
@@ -119,7 +124,7 @@ Não. O TakeScreen é portátil: basta extrair o zip e abrir o exe. Pode rodar a
 
 <br>
 
-No usuário do Windows, em `%APPDATA%\TakeScreen` (datashow escolhido, proteção e imagem de espera). Para voltar ao padrão, feche o TakeScreen e apague essa pasta.
+No usuário do Windows, em `%APPDATA%\TakeScreen` (datashow escolhido, proteção, imagem de espera e fila). Para voltar ao padrão, feche o TakeScreen e apague essa pasta.
 
 </details>
 
@@ -147,6 +152,24 @@ Ele abre, mas EXIBIR e Limpar não cobrem nada, porque cobririam o próprio pain
 <br>
 
 Com **Proteger datashow** ligado, a apresentação fica escondida atrás da cortina e já aparece na PRÉVIA. Aperte **EXIBIR** (ou Enter) quando quiser mostrar.
+
+</details>
+
+<details>
+<summary><b>Por que o Chrome tem um controle de volume só para todas as abas?</b></summary>
+
+<br>
+
+O Windows controla o volume por programa, não por aba. Para mudar o volume de uma aba só, use o próprio site (por exemplo o volume do YouTube). No painel **Mídia**, porém, cada aba que toca aparece separada e pode ser pausada sozinha.
+
+</details>
+
+<details>
+<summary><b>O botão do VLC diz que não achou o VLC.</b></summary>
+
+<br>
+
+Instale o VLC pelo site oficial, [videolan.org](https://www.videolan.org). O TakeScreen procura o VLC no registro do Windows e nas pastas de programas.
 
 </details>
 
@@ -191,8 +214,8 @@ O programa sai em `target/x86_64-pc-windows-gnu/release/TakeScreen.exe`.
 Cada envio para a branch `main` gera o `TakeScreen-windows-x64.zip` na aba **Actions** do GitHub (em *Artifacts*). Uma tag começando com `v` publica o zip em **Releases**:
 
 ```
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 </details>
