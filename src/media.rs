@@ -30,7 +30,7 @@ pub struct MediaSession {
 }
 
 #[derive(Clone, Copy)]
-// Play e Pause ficam no contrato; a interface usa Toggle porque só sabe `can_toggle`.
+// Play and Pause are in the contract; the UI uses Toggle because it only knows `can_toggle`.
 #[allow(dead_code)]
 pub enum MediaCmd {
     Play,
@@ -144,6 +144,7 @@ fn send_command(
     result.ok().and_then(|op| op.join().ok()).unwrap_or(false)
 }
 
+/// Extracts a friendly app name from the source string.
 fn friendly_app_name(source: &str) -> String {
     let name = source.rsplit(['\\', '/']).next().unwrap_or(source);
     let name = name.split('!').next().unwrap_or(name);

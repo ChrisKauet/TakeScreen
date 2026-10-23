@@ -1,5 +1,5 @@
-//! Tudo o que conversa com o Windows: listar janelas e monitores, mover janelas
-//! para o datashow e desenhar as prévias ao vivo (miniaturas do DWM).
+//! Everything that talks to Windows: listing windows and monitors, moving windows
+//! to the projector and drawing the live previews (DWM thumbnails).
 
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -16,7 +16,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Identificador de janela que pode ser copiado e comparado livremente.
+/// Window handle that can be freely copied and compared.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Hwnd(pub isize);
 
@@ -55,7 +55,7 @@ impl Rect {
         Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
     }
 
-    /// O centro deste retângulo cai dentro de `o`.
+    /// The center of this rectangle falls inside `o`.
     pub fn center_in(&self, o: &Rect) -> bool {
         let (x, y) = ((self.left + self.right) / 2, (self.top + self.bottom) / 2);
         o.left <= x && x < o.right && o.top <= y && y < o.bottom
@@ -65,7 +65,7 @@ impl Rect {
         self.left <= o.left && self.top <= o.top && self.right >= o.right && self.bottom >= o.bottom
     }
 
-    /// Área em comum com `o`, em pixels.
+    /// Area shared with `o`, in pixels.
     pub fn overlap_area(&self, o: &Rect) -> i32 {
         let w = self.right.min(o.right) - self.left.max(o.left);
         let h = self.bottom.min(o.bottom) - self.top.max(o.top);
@@ -78,7 +78,7 @@ impl Rect {
 }
 
 // ---------------------------------------------------------------------------
-// Janelas abertas
+// Open windows
 
 #[derive(Clone, Debug)]
 pub struct WindowInfo {
@@ -87,11 +87,11 @@ pub struct WindowInfo {
     pub exe: String,
     pub exe_path: String,
     pub minimized: bool,
-    /// Apps da Microsoft Store (Fotos, Filmes e TV) vivem dentro de um "ApplicationFrameWindow".
+    /// Microsoft Store apps (Photos, Movies & TV) live inside an "ApplicationFrameWindow".
     pub uwp: bool,
 }
 
-/// Lista as janelas que fazem sentido mostrar ao operador, na ordem em que estão empilhadas.
+/// Lists the windows worth showing to the operator, in their stacking order.
 pub fn list_windows() -> Vec<WindowInfo> {
     let mut out: Vec<WindowInfo> = Vec::new();
     unsafe {
@@ -179,7 +179,7 @@ fn process_path(pid: u32) -> String {
     }
 }
 
-/// O processo real de um app da Store é o da janela filha (CoreWindow), não o ApplicationFrameHost.
+/// The real process of a Store app belongs to the child window (CoreWindow), not to ApplicationFrameHost.
 fn uwp_exe(frame: HWND, frame_pid: u32) -> String {
     struct Search {
         frame_pid: u32,
@@ -207,8 +207,8 @@ pub fn window_rect(hwnd: Hwnd) -> Option<Rect> {
     Some(Rect::from_win(r))
 }
 
-/// O que aparece de fato na tela. O `GetWindowRect` inclui uma borda invisível de uns
-/// 8 px: uma janela maximizada na tela 1 "passaria" para a tela 2 do lado.
+/// What actually appears on screen. `GetWindowRect` includes an invisible border of about
+/// 8 px: a window maximized on screen 1 would otherwise "spill" onto the adjacent screen 2.
 pub fn visible_rect(hwnd: Hwnd) -> Option<Rect> {
     let mut r = RECT::default();
     let ok = unsafe {
@@ -221,7 +221,7 @@ pub fn visible_rect(hwnd: Hwnd) -> Option<Rect> {
     }
 }
 
-/// Como a janela está agora, para conferir se uma troca deu certo.
+/// The current state of the window, used to verify whether a switch succeeded.
 #[derive(Clone, Copy, Debug)]
 pub struct WinState {
     pub rect: Option<Rect>,
@@ -249,23 +249,23 @@ pub fn state(hwnd: Hwnd) -> WinState {
 }
 
 impl WinState {
-    /// O público vê a janela: visível, não minimizada e não escondida pelo DWM.
+    /// The audience sees the window: visible, not minimized and not cloaked by DWM.
     pub fn shown(&self) -> bool {
         self.visible && !self.iconic && !self.cloaked
     }
 }
 
-/// `r` cobre `mon`, aceitando `tol` pixels de folga em cada borda.
+/// `r` covers `mon`, allowing `tol` pixels of slack on each edge.
 pub fn covers_within(r: &Rect, mon: &Rect, tol: i32) -> bool {
     r.left <= mon.left + tol && r.top <= mon.top + tol && r.right >= mon.right - tol && r.bottom >= mon.bottom - tol
 }
 
-/// Funções do user32 que o crate `windows` só traz com a feature HiDpi.
+/// user32 functions that the `windows` crate only exposes with the HiDpi feature.
 fn user32(name: windows::core::PCSTR) -> Option<unsafe extern "system" fn() -> isize> {
     unsafe { GetProcAddress(GetModuleHandleW(w!("user32.dll")).ok()?, name) }
 }
 
-/// O mesmo modo de DPI do painel (o eframe liga o "por monitor v2"): tudo em pixels físicos.
+/// The same DPI mode as the panel (eframe enables "per monitor v2"): everything in physical pixels.
 pub fn dpi_aware() {
     if let Some(f) = user32(windows::core::s!("SetProcessDpiAwarenessContext")) {
         let f: unsafe extern "system" fn(isize) -> BOOL = unsafe { std::mem::transmute(f) };
@@ -275,7 +275,7 @@ pub fn dpi_aware() {
     }
 }
 
-/// Descreve a janela sem mexer nela (autoteste `--inspect`).
+/// Describes the window without touching it (self-test `--inspect`).
 pub fn describe(hwnd: Hwnd) -> String {
     let h = hwnd.h();
     unsafe {
@@ -307,7 +307,7 @@ pub fn describe(hwnd: Hwnd) -> String {
             let f: unsafe extern "system" fn(HWND) -> u32 = std::mem::transmute(f);
             f(h)
         });
-        // Quem não é administrador consegue a consulta limitada, mas não a completa, de um processo elevado.
+        // A non-administrator can obtain the limited query, but not the full one, for an elevated process.
         let elevated = OpenProcess(PROCESS_QUERY_INFORMATION, false, pid).map(|p| CloseHandle(p)).is_err()
             && OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map(|p| CloseHandle(p)).is_ok();
         let r = |r: RECT| format!("{},{},{},{}", r.left, r.top, r.right, r.bottom);
@@ -340,7 +340,7 @@ pub fn describe(hwnd: Hwnd) -> String {
     }
 }
 
-/// Abre o seletor nativo para uma imagem de espera.
+/// Opens the native file picker for a standby image.
 pub fn pick_image_file(owner: Option<Hwnd>) -> Option<String> {
     pick_file(owner, w!("Imagens (*.png;*.jpg;*.jpeg)\0*.png;*.jpg;*.jpeg\0\0"))
 }
@@ -356,7 +356,7 @@ pub fn pick_any_file(owner: Option<Hwnd>) -> Option<String> {
     pick_file(owner, w!("Todos os arquivos (*.*)\0*.*\0\0"))
 }
 
-/// Abre um arquivo ou link com o programa padrão do Windows.
+/// Opens a file or link with the default Windows program.
 pub fn open_path(path: &str) -> bool {
     let path = windows::core::HSTRING::from(path);
     let r = unsafe { ShellExecuteW(None, w!("open"), &path, None, None, SW_SHOWNORMAL) };
@@ -383,7 +383,7 @@ fn pick_file(owner: Option<Hwnd>, filter: windows::core::PCWSTR) -> Option<Strin
     Some(String::from_utf16_lossy(&file[..end]))
 }
 
-/// O operador está arrastando ou redimensionando a janela agora.
+/// The operator is currently dragging or resizing the window.
 fn in_move_size(hwnd: HWND) -> bool {
     unsafe {
         let tid = GetWindowThreadProcessId(hwnd, None);
@@ -399,16 +399,16 @@ pub fn move_window(hwnd: Hwnd, x: i32, y: i32) {
 }
 
 // ---------------------------------------------------------------------------
-// Monitores
+// Monitors
 
 #[derive(Clone, Debug)]
 pub struct Monitor {
-    /// Nome GDI, por exemplo `\\.\DISPLAY2`. Pode mudar quando a ordem dos monitores muda.
+    /// GDI name, for example `\\.\DISPLAY2`. It may change when the monitor order changes.
     pub device: String,
-    /// Nome do aparelho, por exemplo "EPSON PJ". Estável entre reinícios.
+    /// Device name, for example "EPSON PJ". Stable across restarts.
     pub name: String,
     pub rect: Rect,
-    /// Área útil, sem a barra de tarefas.
+    /// Work area, excluding the taskbar.
     pub work: Rect,
     pub primary: bool,
 }
@@ -421,7 +421,7 @@ impl Monitor {
         format!("{n} (tela {num}{principal}, {}x{})", self.rect.width(), self.rect.height())
     }
 
-    /// A janela (retângulo visível) está neste monitor: o centro dela cai nele.
+    /// The window (visible rectangle) is on this monitor: its center falls inside it.
     pub fn holds(&self, r: &Rect) -> bool {
         r.center_in(&self.rect)
     }
@@ -458,7 +458,7 @@ unsafe extern "system" fn enum_monitors_cb(hmon: HMONITOR, _: HDC, _: *mut RECT,
     TRUE
 }
 
-/// Mapeia o nome GDI de cada monitor para o nome do aparelho (EDID).
+/// Maps the GDI name of each monitor to the device name (EDID).
 fn friendly_names() -> HashMap<String, String> {
     let mut map = HashMap::new();
     unsafe {
@@ -506,10 +506,10 @@ fn utf16_z(buf: &[u16]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Cortina: uma janela preta (ou com a imagem de espera), sem borda, que cobre o
-// datashow por baixo do que está no ar.
+// Curtain: a borderless black window (or one showing the standby image) that covers the
+// projector beneath whatever is live.
 
-/// Imagem de espera já convertida para o formato do GDI (BGRA, de cima para baixo).
+/// Standby image already converted to the GDI format (BGRA, top-down).
 struct Picture {
     w: i32,
     h: i32,
@@ -518,7 +518,7 @@ struct Picture {
 
 static STANDBY: Mutex<Option<Picture>> = Mutex::new(None);
 
-/// Troca a imagem de espera (`None` volta para a tela preta). `rgba` vem de cima para baixo.
+/// Replaces the standby image (`None` reverts to the black screen). `rgba` is top-down.
 pub fn set_standby(curtain: Option<Hwnd>, image: Option<([usize; 2], Vec<u8>)>) {
     let pic = image.map(|([w, h], mut px)| {
         for p in px.chunks_mut(4) {
@@ -534,7 +534,7 @@ pub fn set_standby(curtain: Option<Hwnd>, image: Option<([usize; 2], Vec<u8>)>) 
     }
 }
 
-/// Onde a imagem fica dentro da tela, mantendo a proporção (sobra preta nas bordas).
+/// Where the image sits within the screen, preserving the aspect ratio (black margins at the edges).
 pub fn letterbox(img: (i32, i32), screen: (i32, i32)) -> Rect {
     let scale = (screen.0 as f32 / img.0.max(1) as f32).min(screen.1 as f32 / img.1.max(1) as f32);
     let (w, h) = ((img.0 as f32 * scale).round() as i32, (img.1 as f32 * scale).round() as i32);
@@ -590,7 +590,7 @@ pub fn create_curtain(r: Rect) -> Option<Hwnd> {
                 paint_curtain(h);
                 LRESULT(0)
             }
-            // O WM_PAINT já pinta tudo: apagar antes só faria a imagem piscar.
+            // WM_PAINT already paints everything: erasing first would only make the image flicker.
             WM_ERASEBKGND => LRESULT(1),
             _ => DefWindowProcW(h, msg, wp, lp),
         }
@@ -620,7 +620,7 @@ pub fn create_curtain(r: Rect) -> Option<Hwnd> {
             None,
         )
         .ok()?;
-        // Começa por baixo de tudo, para não apagar o que já estiver no datashow ao abrir o programa.
+        // Starts beneath everything, so it does not hide what is already on the projector when the program opens.
         let _ = SetWindowPos(h, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         Some(Hwnd::from(h))
     }
@@ -640,17 +640,17 @@ pub fn destroy(hwnd: Hwnd) {
 }
 
 // ---------------------------------------------------------------------------
-// Exibir no datashow e devolver à tela 1
+// Show on the projector and return to screen 1
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fit {
-    /// Tira a borda e a barra de título e ocupa o monitor inteiro. Melhor para programas comuns.
+    /// Removes the border and title bar and fills the entire monitor. Best for ordinary programs.
     Borderless,
-    /// Só maximiza no monitor. Necessário para apps da Store, que desenham a própria moldura.
+    /// Only maximizes on the monitor. Required for Store apps, which draw their own frame.
     Maximize,
 }
 
-/// Como a janela estava antes de ir para o datashow, para devolvê-la igualzinha.
+/// The window state before it went to the projector, so it can be restored exactly.
 #[derive(Clone, Copy)]
 pub struct Saved {
     pub hwnd: Hwnd,
@@ -663,14 +663,14 @@ const CLOSED: &str = "Não consegui mover essa janela. Ela ainda está aberta?";
 const ELEVATED: &str =
     "Esta janela é de um programa em modo administrador: execute o TakeScreen como administrador para exibi-la.";
 const LOST: &str = "Essa janela não apareceu no datashow e voltou para a tela 1.";
-/// Bits de estado que não podem voltar junto com a moldura salva: a janela passaria a se
-/// achar maximizada ou minimizada sem estar, e o Windows ignoraria o pedido seguinte.
+/// State bits that must not be restored with the saved frame: the window would believe
+/// it is maximized or minimized when it is not, and Windows would ignore the next request.
 const STATE_BITS: isize = (WS_MAXIMIZE.0 | WS_MINIMIZE.0) as isize;
 
-/// Leva `target` para o monitor `mon`. A janela é montada por baixo de `cover`
-/// (o que está no ar agora) e só no fim vem para a frente, de uma vez,
-/// então o público não vê ela sendo arrastada ou redimensionada.
-/// Confere o resultado: se o ajuste pedido não cobrir o datashow, tenta de novo e depois maximiza.
+/// Moves `target` to monitor `mon`. The window is assembled beneath `cover`
+/// (what is live now) and only comes to the front at the end, all at once,
+/// so the audience never sees it being dragged or resized.
+/// Verifies the result: if the requested fit does not cover the projector, retries and then maximizes.
 pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Result<Saved, String> {
     let h = target.h();
     unsafe {
@@ -685,13 +685,13 @@ pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Re
             exstyle: GetWindowLongPtrW(h, GWL_EXSTYLE),
         };
 
-        // 0. Programa em modo administrador: o Windows recusa em silêncio qualquer ajuste vindo
-        //    de um programa comum. Um SetWindowPos que não muda nada denuncia isso antes de mexer.
+        // 0. Program running as administrator: Windows silently rejects any adjustment coming
+        //    from an ordinary program. A SetWindowPos that changes nothing reveals this before anything moves.
         if let Err(e) = SetWindowPos(h, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) {
             return Err(if e.code() == E_ACCESSDENIED { ELEVATED } else { CLOSED }.into());
         }
 
-        // 1. Sai de minimizado/maximizado sem roubar o foco do operador.
+        // 1. Leaves the minimized/maximized state without stealing the focus of the operator.
         if IsIconic(h).as_bool() || IsZoomed(h).as_bool() {
             let mut normal = pl;
             normal.flags = WINDOWPLACEMENT_FLAGS(0);
@@ -699,19 +699,19 @@ pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Re
             let _ = SetWindowPlacement(h, &normal);
         }
 
-        // 2. Primeiro só leva para o datashow, no tamanho atual: se o DPI de lá for outro, o
-        //    programa se reajusta agora (WM_DPICHANGED) e não desfaz o tamanho final depois.
+        // 2. First moves it to the projector at its current size: if the DPI there differs, the
+        //    program readjusts now (WM_DPICHANGED) and does not undo the final size later.
         let flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
         let _ = SetWindowPos(h, Some(cover.h()), mon.left + 40, mon.top + 40, 0, 0, flags | SWP_NOSIZE);
 
-        // 3. Ajusta, confere o que aparece de fato e cai para o próximo jeito se não cobrir.
+        // 3. Adjusts, verifies what actually appears and falls back to the next method if it does not cover.
         let monitors = list_monitors();
         let work = monitors.iter().find(|m| m.rect == mon).map_or(mon, |m| m.work);
         let mut done = false;
         if fit == Fit::Borderless {
             let caption = (WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0 as isize;
             let edges = (WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE).0 as isize;
-            // Duas vezes: Chromium e Electron às vezes desfazem o primeiro ajuste.
+            // Twice: Chromium and Electron sometimes undo the first adjustment.
             for _ in 0..2 {
                 SetWindowLongPtrW(h, GWL_STYLE, saved.style & !caption & !STATE_BITS);
                 SetWindowLongPtrW(h, GWL_EXSTYLE, saved.exstyle & !edges);
@@ -722,24 +722,24 @@ pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Re
                 }
             }
             if !done {
-                // Vai maximizar: com a moldura de volta, para não ficar sem barra de título.
+                // About to maximize: restore the frame first, so the window is not left without a title bar.
                 SetWindowLongPtrW(h, GWL_STYLE, saved.style & !STATE_BITS);
                 SetWindowLongPtrW(h, GWL_EXSTYLE, saved.exstyle);
             }
         }
         if !done {
-            // O Windows não tem "maximizar sem ativar": o SW_MAXIMIZE sempre traz a janela
-            // para a frente. Durante a troca, a cobertura fica "sempre visível" por cima
-            // dela, e o público continua vendo só o que estava no ar.
+            // Windows has no "maximize without activating": SW_MAXIMIZE always brings the window
+            // to the front. During the switch, the cover stays "always on top" above it,
+            // so the audience keeps seeing only what was live.
             let was_topmost = GetWindowLongPtrW(cover.h(), GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
             let still = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
             let _ = SetWindowPos(cover.h(), Some(HWND_TOPMOST), 0, 0, 0, 0, still);
             let _ = SetWindowPos(h, Some(cover.h()), mon.left + 40, mon.top + 40, mon.width() - 80, mon.height() - 80, flags | SWP_FRAMECHANGED);
             let _ = ShowWindow(h, SW_MAXIMIZE);
-            // Maximizada ocupa a área útil: se o datashow tiver barra de tarefas, ela continua à vista.
+            // A maximized window fills the work area: if the projector has a taskbar, it remains visible.
             done = settled(target, &work);
             if !was_topmost {
-                // Sai do "sempre visível" e fica logo acima das janelas comuns, ainda por cima da nova.
+                // Leaves "always on top" and sits just above ordinary windows, still above the new one.
                 let _ = SetWindowPos(cover.h(), Some(HWND_NOTOPMOST), 0, 0, 0, 0, still);
             }
         }
@@ -747,13 +747,13 @@ pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Re
         let now = state(target);
         let others: Vec<Rect> = monitors.iter().filter(|m| m.rect != mon).map(|m| m.rect).collect();
         match now.rect {
-            // Tamanho mínimo maior que o datashow: a sobra vai para o lado onde não há outra tela.
+            // Minimum size larger than the projector: the excess goes to the side with no other screen.
             Some(r) if done && (r.width() > mon.width() || r.height() > mon.height()) => {
                 let (x, y) = spill_origin((r.width(), r.height()), &mon, &others);
                 let wr = window_rect(target).unwrap_or(r);
                 let _ = SetWindowPos(h, None, x - (r.left - wr.left), y - (r.top - wr.top), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
-            // Não cobre (tamanho fixo), mas está à vista no datashow: fica no ar, com a cortina preta em volta.
+            // Does not cover (fixed size), but is visible on the projector: it stays live, with the black curtain around it.
             Some(r) if now.shown() && r.overlap_area(&mon) > 0 => {}
             _ if !done => {
                 restore(&saved);
@@ -762,18 +762,18 @@ pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Re
             _ => {}
         }
 
-        // 4. A troca: traz para a frente e deixa a cortina logo atrás, para o caso de a janela fechar.
+        // 4. The switch: brings it to the front and keeps the curtain right behind, in case the window closes.
         let _ = SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         let _ = SetWindowPos(curtain.h(), Some(h), mon.left, mon.top, mon.width(), mon.height(), SWP_NOACTIVATE | SWP_SHOWWINDOW);
         Ok(saved)
     }
 }
 
-/// Dá um tempo para o programa terminar de se ajustar e confere se a janela cobre `want`.
+/// Gives the program time to finish adjusting and verifies whether the window covers `want`.
 fn settled(target: Hwnd, want: &Rect) -> bool {
     for _ in 0..5 {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        // Atende as mensagens enviadas ao painel (ativação, foco): o outro programa espera por elas.
+        // Handles messages sent to the panel (activation, focus): the other program waits for them.
         unsafe {
             let mut msg = MSG::default();
             let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
@@ -783,7 +783,7 @@ fn settled(target: Hwnd, want: &Rect) -> bool {
     s.shown() && s.rect.is_some_and(|r| covers_within(&r, want, 2))
 }
 
-/// Onde pôr uma janela de tamanho `size` maior que `mon`, cobrindo ele e invadindo o mínimo as `others`.
+/// Where to place a window of size `size` larger than `mon`, covering it while intruding as little as possible on `others`.
 pub fn spill_origin(size: (i32, i32), mon: &Rect, others: &[Rect]) -> (i32, i32) {
     let xs = [mon.left, mon.right - size.0, mon.left - (size.0 - mon.width()) / 2];
     let ys = [mon.top, mon.bottom - size.1, mon.top - (size.1 - mon.height()) / 2];
@@ -802,7 +802,7 @@ pub fn spill_origin(size: (i32, i32), mon: &Rect, others: &[Rect]) -> (i32, i32)
     best
 }
 
-/// Devolve a janela ao lugar, tamanho e moldura que tinha antes de ir para o datashow.
+/// Returns the window to the position, size and frame it had before going to the projector.
 pub fn restore(s: &Saved) {
     let h = s.hwnd.h();
     unsafe {
@@ -811,7 +811,7 @@ pub fn restore(s: &Saved) {
         }
         let mut pl = s.placement;
         pl.flags = WINDOWPLACEMENT_FLAGS(0);
-        // Maximizada no datashow: primeiro sai do maximizado, senão o Windows a mantém lá.
+        // Maximized on the projector: leave the maximized state first, otherwise Windows keeps it there.
         if IsZoomed(h).as_bool() {
             let mut normal = pl;
             normal.showCmd = SW_SHOWNOACTIVATE.0 as u32;
@@ -826,7 +826,7 @@ pub fn restore(s: &Saved) {
         };
         let _ = SetWindowPlacement(h, &pl);
         let _ = SetWindowPos(h, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        // Nunca some: se não ficou à vista em nenhuma tela, vai para o meio da principal.
+        // Never disappears: if it ended up visible on no screen, it moves to the center of the primary one.
         let st = state(s.hwnd);
         let monitors = list_monitors();
         if !st.iconic && !st.rect.is_some_and(|r| monitors.iter().any(|m| r.center_in(&m.rect))) {
@@ -838,9 +838,9 @@ pub fn restore(s: &Saved) {
 }
 
 // ---------------------------------------------------------------------------
-// Recuperação: se o TakeScreen fechar de repente (erro, processo encerrado), a janela
-// que estava no ar ficaria sem moldura no datashow. Ela é anotada em um arquivo e
-// devolvida no próximo início, ou na hora, se o erro for dentro do programa.
+// Recovery: if TakeScreen closes abruptly (error, killed process), the window
+// that was live would remain frameless on the projector. It is recorded in a file and
+// restored on the next start, or immediately if the error occurs inside the program.
 
 static ON_AIR: Mutex<Option<Saved>> = Mutex::new(None);
 
@@ -849,7 +849,7 @@ fn recovery_file() -> Option<std::path::PathBuf> {
     Some(std::path::Path::new(&base).join("TakeScreen").join("no-ar.txt"))
 }
 
-/// Anota (ou apaga, com `None`) a janela que está no ar.
+/// Records (or erases, with `None`) the window that is live.
 pub fn remember_on_air(s: Option<&Saved>) {
     if let Ok(mut g) = ON_AIR.lock() {
         *g = s.copied();
@@ -902,14 +902,14 @@ fn parse_recovery(text: &str) -> Option<(Saved, u32)> {
     Some((Saved { hwnd: Hwnd(hwnd as isize), placement, style: style as isize, exstyle: exstyle as isize }, pid as u32))
 }
 
-/// No início: se a última sessão deixou uma janela no ar, devolve ela como estava.
-/// Retorna o título da janela devolvida.
+/// On startup: if the last session left a window live, restores it to its previous state.
+/// Returns the title of the restored window.
 pub fn recover_previous() -> Option<String> {
     let path = recovery_file()?;
     let text = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(&path);
     let (saved, pid) = parse_recovery(&text)?;
-    // O número da janela pode ter sido reaproveitado por outro programa.
+    // The window handle may have been reused by another program.
     if !saved.hwnd.exists() || window_pid(saved.hwnd.h()) != pid {
         return None;
     }
@@ -917,7 +917,7 @@ pub fn recover_previous() -> Option<String> {
     Some(window_text(saved.hwnd.h()))
 }
 
-/// Para o caso de erro dentro do programa: devolve a janela no ar na hora.
+/// For errors inside the program: restores the live window immediately.
 pub fn recover_now() {
     if let Ok(mut g) = ON_AIR.try_lock() {
         if let Some(s) = g.take() {
@@ -929,8 +929,8 @@ pub fn recover_now() {
     }
 }
 
-/// Traz o painel para a frente e devolve a ele o teclado. Depois de mexer nas janelas
-/// do datashow, o painel pode continuar na frente sem o foco do teclado, e o Esc se perderia.
+/// Brings the panel to the front and returns keyboard focus to it. After moving the projector
+/// windows, the panel may stay in front without keyboard focus, and Esc would be lost.
 pub fn focus(hwnd: Hwnd) {
     unsafe {
         let _ = SetForegroundWindow(hwnd.h());
@@ -938,27 +938,69 @@ pub fn focus(hwnd: Hwnd) {
     }
 }
 
-/// Aperta uma tecla na janela que está no ar (F11 no Chrome e no Fotos põe em tela cheia)
-/// e devolve o foco ao painel.
-pub fn send_key(target: Hwnd, vk: VIRTUAL_KEY, back_to: Hwnd) {
-    let key = |flags| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, dwFlags: flags, ..Default::default() } },
-    };
+/// Presses a key on the live window and returns focus to the panel (F11 puts the browser
+/// in full screen; F does the same for YouTube and most players). Fails if the window does not activate.
+pub fn press_key_on(target: Hwnd, vk: VIRTUAL_KEY, back_to: Hwnd) -> Result<(), String> {
+    if !activate(target) {
+        activate(back_to);
+        return Err("Não consegui ativar a janela no ar para apertar a tecla. Tente de novo.".into());
+    }
     unsafe {
-        let _ = SetForegroundWindow(target.h());
-        std::thread::sleep(std::time::Duration::from_millis(80));
+        // Sending the scancode as well makes the page receive the key as if it came from the keyboard (event.code).
+        let scan = MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) as u16;
+        let key = |flags| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, ..Default::default() } },
+        };
         SendInput(&[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32);
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        let _ = SetForegroundWindow(back_to.h());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    activate(back_to);
+    focus(back_to);
+    Ok(())
+}
+
+/// Brings the window to the front with keyboard focus. Windows only lets the foreground process
+/// change focus; attaching our input queue to that of the foreground window works around this.
+fn activate(hwnd: Hwnd) -> bool {
+    let h = hwnd.h();
+    unsafe {
+        let me = GetCurrentThreadId();
+        let front = GetWindowThreadProcessId(GetForegroundWindow(), None);
+        let attached = front != 0 && front != me && AttachThreadInput(me, front, true).as_bool();
+        let _ = BringWindowToTop(h);
+        let _ = SetForegroundWindow(h);
+        if attached {
+            let _ = AttachThreadInput(me, front, false);
+        }
+        for _ in 0..10 {
+            if GetForegroundWindow() == h {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        false
     }
 }
 
+/// The window that currently holds the keyboard.
+pub fn foreground() -> Hwnd {
+    Hwnd::from(unsafe { GetForegroundWindow() })
+}
+
+pub fn title(hwnd: Hwnd) -> String {
+    window_text(hwnd.h())
+}
+
+pub use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+
 pub const VK_FULLSCREEN: VIRTUAL_KEY = VK_F11;
+/// Video full screen on YouTube, Vimeo, Twitch, Netflix and most HTML5 players.
+pub const VK_VIDEO_FULLSCREEN: VIRTUAL_KEY = VK_F;
 
 // ---------------------------------------------------------------------------
-// Prévias ao vivo: o próprio Windows (DWM) desenha a janela de origem dentro do
-// nosso painel, sem custo de CPU para o programa.
+// Live previews: Windows itself (DWM) draws the source window inside
+// our panel, at no CPU cost to the program.
 
 pub struct Thumbnail {
     pub src: Hwnd,
@@ -971,9 +1013,9 @@ impl Thumbnail {
         Some(Thumbnail { src, id })
     }
 
-    /// `area` em pixels físicos, relativos à área interna do painel. A imagem é
-    /// centralizada mantendo a proporção da janela de origem, e cortada em `clip`
-    /// (o Windows desenha por cima do painel e não sabe onde termina uma área com rolagem).
+    /// `area` in physical pixels, relative to the panel client area. The image is
+    /// centered preserving the aspect ratio of the source window, and clipped to `clip`
+    /// (Windows draws over the panel and does not know where a scrolling area ends).
     pub fn show(&self, area: Rect, clip: Rect) {
         unsafe {
             let Ok(size) = DwmQueryThumbnailSourceSize(self.id) else { return };
@@ -1033,14 +1075,14 @@ impl Drop for Thumbnail {
 }
 
 // ---------------------------------------------------------------------------
-// Ícones dos programas
+// Program icons
 
 pub struct Icon {
     pub size: [usize; 2],
     pub rgba: Vec<u8>,
 }
 
-/// O ícone que a janela mostra na barra de tarefas; se ela não informar, o ícone do .exe.
+/// The icon the window shows on the taskbar; if it provides none, the icon of the .exe.
 pub fn window_icon(w: &WindowInfo) -> Option<Icon> {
     let h = w.hwnd.h();
     unsafe {
@@ -1124,7 +1166,7 @@ unsafe fn icon_to_rgba(icon: HICON) -> Option<Icon> {
         buf
     };
     let mut px = read(ii.hbmColor);
-    // Ícones antigos não têm transparência no canal alfa, só na máscara.
+    // Legacy icons have no transparency in the alpha channel, only in the mask.
     if px.chunks(4).all(|p| p[3] == 0) {
         let mask = read(ii.hbmMask);
         for (p, m) in px.chunks_mut(4).zip(mask.chunks(4)) {
@@ -1139,9 +1181,9 @@ unsafe fn icon_to_rgba(icon: HICON) -> Option<Icon> {
 }
 
 // ---------------------------------------------------------------------------
-// Proteção do datashow: qualquer janela que aparecer na tela 2 sem passar pelo
-// TakeScreen (um programa aberto sem querer, uma janela que lembrou da última posição)
-// é devolvida na hora para a tela 1.
+// Projector protection: any window that appears on screen 2 without going through
+// TakeScreen (a program opened by accident, a window that remembered its last position)
+// is sent back to screen 1 immediately.
 
 use std::sync::{Mutex, OnceLock};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
@@ -1150,11 +1192,11 @@ struct Guard {
     enabled: bool,
     datashow: Rect,
     home: Rect,
-    /// Janelas que podem ficar no datashow: a que está no ar e a que está entrando.
+    /// Windows allowed to stay on the projector: the live one and the incoming one.
     allowed: Vec<isize>,
-    /// Títulos devolvidos desde a última vez que o painel olhou.
+    /// Titles sent back since the panel last checked.
     returned: Vec<String>,
-    /// Apresentações que chegaram ao datashow desde a última leitura do painel.
+    /// Presentations that reached the projector since the panel last read them.
     arrived: Vec<isize>,
     curtain: Option<isize>,
 }
@@ -1170,7 +1212,7 @@ static GUARD: Mutex<Guard> = Mutex::new(Guard {
 });
 static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
-/// Liga os avisos do Windows sobre janelas aparecendo e se movendo. `wake` acorda o painel.
+/// Enables Windows notifications about windows appearing and moving. `wake` wakes the panel.
 pub fn guard_install(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
     let events = [
@@ -1220,7 +1262,7 @@ unsafe extern "system" fn guard_event(_: HWINEVENTHOOK, _event: u32, hwnd: HWND,
     if in_move_size(hwnd) {
         return;
     }
-    // Só janelas "de verdade" (as mesmas que aparecem nos cartões); menus e diálogos ficam com o dono.
+    // Only "real" windows (the same ones shown on the cards); menus and dialogs stay with their owner.
     let Some(info) = window_info(hwnd) else { return };
     if IsIconic(hwnd).as_bool() {
         return;
@@ -1256,7 +1298,7 @@ unsafe extern "system" fn guard_event(_: HWINEVENTHOOK, _event: u32, hwnd: HWND,
     }
 }
 
-/// Coloca a janela no meio da tela 1, sem ativá-la, cabendo na área útil.
+/// Places the window in the center of screen 1, without activating it, fitting the work area.
 pub fn send_home(hwnd: Hwnd, home: Rect) {
     let h = hwnd.h();
     unsafe {
@@ -1271,7 +1313,7 @@ pub fn send_home(hwnd: Hwnd, home: Rect) {
         let (Some(r), Some(wr)) = (visible_rect(hwnd), window_rect(hwnd)) else { return };
         let w = r.width().min(home.width() * 9 / 10).max(200);
         let ht = r.height().min(home.height() * 9 / 10).max(150);
-        // O SetWindowPos conta a borda invisível (uns 8 px): sem ela, a janela encolheria a cada volta.
+        // SetWindowPos counts the invisible border (about 8 px): without it, the window would shrink on every return.
         let (bl, bt) = (r.left - wr.left, r.top - wr.top);
         let (bw, bh) = (wr.width() - r.width(), wr.height() - r.height());
         let x = home.left + (home.width() - w) / 2 - bl;
@@ -1327,14 +1369,14 @@ mod tests {
 
     #[test]
     fn spill_origin_pushes_overflow_away_from_other_screens() {
-        // Datashow à esquerda da tela principal: a sobra vai para a esquerda, onde não há tela.
+        // Projector to the left of the primary screen: the excess goes left, where there is no screen.
         let datashow = rect(-1600, 0, 0, 900);
         let primary = rect(0, 0, 1920, 1080);
         assert_eq!(spill_origin((1700, 1000), &datashow, &[primary]), (-1700, 0));
-        // Datashow à direita: a sobra vai para a direita.
+        // Projector to the right: the excess goes right.
         let right = rect(1920, 0, 3520, 900);
         assert_eq!(spill_origin((1700, 1000), &right, &[primary]), (1920, 0));
-        // Sem vizinhos, cobre a partir do canto.
+        // No neighbors: cover starting from the corner.
         assert_eq!(spill_origin((1700, 1000), &datashow, &[]), (-1600, 0));
     }
 

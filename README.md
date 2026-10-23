@@ -70,6 +70,7 @@ TakeScreen lets the person running the screen at a church service, class or even
 | ⬛ | **Limpar datashow** (clear, or Esc) | Covers the external screen with the standby image (or black). With a menu open, Esc only closes the menu. |
 | 🖼️ | **Standby image** | Under *Espera*, **Escolher imagem** (PNG or JPEG) sets what the audience sees when nothing is on air, centered and undistorted. **Usar tela preta** goes back to black. |
 | 🔲 | **Program fullscreen** (F11) | Presses F11 in the window on air (Chrome, Photos). |
+| 📺 | **Video fullscreen** (F) | Presses F in the window on air to toggle video fullscreen (YouTube, Vimeo, Twitch and most HTML5 players). |
 | 🛡️ | **Proteger datashow** (protect, on by default) | Any window that opens or is dragged onto screen 2 without going through TakeScreen goes straight back to screen 1. |
 | 📊 | **PowerPoint shows** | When PowerPoint opens the slideshow directly on the external screen, it stays hidden behind the curtain and appears in the preview. Press EXIBIR to show it. |
 | ♻️ | **Crash recovery** | If TakeScreen closes with a window on air, that window goes back to screen 1 as it was, right away or on the next start. |
@@ -192,6 +193,7 @@ Released under the [MIT](LICENSE) license.
 | ⬛ | **Limpar datashow** (ou Esc) | Cobre a tela externa com a imagem de espera (ou tela preta). Com um menu aberto, Esc só fecha o menu. |
 | 🖼️ | **Imagem de espera** | Em *Espera*, **Escolher imagem** (PNG ou JPEG) define o que o público vê quando nada está no ar, centralizada e sem distorcer. **Usar tela preta** volta ao preto. A imagem é lembrada na próxima abertura; se o arquivo sumir, a tela externa fica preta e a barra de status avisa. |
 | 🔲 | **Tela cheia do programa** (F11) | Aperta F11 na janela que está no ar (Chrome, Fotos). |
+| 📺 | **Vídeo em tela cheia** (F) | Aperta F no player da janela no ar; funciona no YouTube, Vimeo, Twitch e na maioria dos players HTML5. |
 | 🛡️ | **Proteger datashow** (vem ligado) | Qualquer janela que abrir ou for arrastada para a tela 2 sem passar pelo TakeScreen volta na hora para a tela 1. A janela que sai do ar também sempre volta para a tela 1. |
 | 📊 | **Apresentações do PowerPoint** | Quando o PowerPoint abre a apresentação direto na tela externa, ela não é devolvida para a tela 1. Fica escondida atrás da cortina e já aparece na PRÉVIA; aperte EXIBIR para mostrar. |
 | 🖥️ | **Um monitor só** | Sem tela externa separada (ou com o painel na mesma tela), EXIBIR e Limpar não cobrem nada e a barra de status avisa. |
@@ -344,8 +346,8 @@ Cada envio para a branch `main` gera o `TakeScreen-windows-x64.zip` na aba **Act
 Every push to `main` builds `TakeScreen-windows-x64.zip` in the **Actions** tab (under *Artifacts*); a tag starting with `v` publishes the zip to **Releases**.
 
 ```
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.3.2
+git push origin v0.3.2
 ```
 
 </details>

@@ -14,20 +14,20 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, 
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 
-/// Chave do grupo das sessões do sistema (sons de notificação do Windows).
+/// System sound group key (Windows notification sounds).
 const SYSTEM_KEY: &str = "sistema";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sound {
     Playing,
-    /// Tem sessão de áudio, mas não está tocando.
+    /// Has audio session, but not playing.
     Idle,
-    /// Programa aberto que ainda não criou sessão de áudio.
+    /// Open program that hasn't created an audio session yet.
     None,
 }
 
-/// Um programa na lista do mixer. `id` é a chave do programa (caminho do exe em minúsculas):
-/// volume e mudo valem para todas as sessões dele, em todos os dispositivos de saída.
+/// A program in the mixer list. `id` is the program key (lowercase exe path):
+/// volume and mute apply to all its sessions, on all output devices.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioApp {
     pub id: String,
@@ -38,7 +38,7 @@ pub struct AudioApp {
     pub sound: Sound,
 }
 
-/// Uma sessão de áudio já ligada ao programa dono dela.
+/// An audio session already linked to its owning program.
 #[derive(Clone, Debug, PartialEq)]
 struct Sess {
     key: String,
@@ -91,7 +91,7 @@ impl Hub {
         Hub { snapshot, commands, known }
     }
 
-    /// Programas com sessão de áudio (os abertos sem som entram em `rows`).
+    /// Programs with audio sessions (those opened without sound go in `rows`).
     pub fn apps(&self) -> Vec<AudioApp> {
         self.snapshot.lock().ok().map(|s| s.apps.clone()).unwrap_or_default()
     }
@@ -100,7 +100,7 @@ impl Hub {
         self.snapshot.lock().ok().map(|s| s.master).unwrap_or((0.0, false))
     }
 
-    /// Caminhos dos exes com janela aberta: o áudio de um processo filho é ligado ao ancestral que está nesta lista.
+    /// Exe paths with open windows: audio from a child process is linked to the ancestor in this list.
     pub fn set_known(&self, exes: &[String]) {
         let set: HashSet<String> = exes.iter().map(|e| e.to_lowercase()).filter(|e| !e.is_empty()).collect();
         if let Ok(mut known) = self.known.lock() {
@@ -127,7 +127,7 @@ impl Hub {
     }
 }
 
-/// Junta as sessões por programa: maior volume e pico, mudo só se todas estão mudas.
+/// Merges sessions by program: highest volume and peak, mute only if all are muted.
 fn group(sessions: Vec<Sess>) -> Vec<AudioApp> {
     let mut apps: Vec<AudioApp> = Vec::new();
     for s in sessions {
@@ -147,8 +147,8 @@ fn group(sessions: Vec<Sess>) -> Vec<AudioApp> {
     apps
 }
 
-/// Lista final do mixer: um item por programa aberto (`programs` = caminho do exe e nome do cartão)
-/// mais os que só têm sessão. Ordem: tocando, parado com sessão, sem áudio; depois por nome.
+/// Final mixer list: one item per open program (`programs` = exe path and card name)
+/// plus those with only sessions. Order: playing, idle with session, no audio; then by name.
 pub fn rows(groups: Vec<AudioApp>, programs: &[(String, String)]) -> Vec<AudioApp> {
     let mut out = groups;
     for (path, label) in programs {
@@ -170,10 +170,10 @@ pub fn rows(groups: Vec<AudioApp>, programs: &[(String, String)]) -> Vec<AudioAp
     out
 }
 
-/// Exe dono do áudio de `pid`: ele mesmo se tem janela, senão o primeiro ancestral com janela
-/// (navegadores e Electron tocam num processo filho). Se nenhum ancestral tem janela, vale o inverso:
-/// um descendente com janela (no Steam o áudio é do steam.exe e a janela é do steamwebhelper).
-/// Sem nenhum dos dois, o próprio exe.
+/// Exe owning the audio of `pid`: itself if it has a window, else the first ancestor with a window
+/// (browsers and Electron play in a child process). If no ancestor has a window, the inverse:
+/// a descendant with a window (in Steam audio is from steam.exe, window is from steamwebhelper).
+/// If neither, the own exe.
 fn resolve(pid: u32, parent: &HashMap<u32, u32>, names: &HashMap<u32, String>, exe_of: &mut dyn FnMut(u32) -> String, known: &HashSet<String>) -> String {
     let own = exe_of(pid);
     if own.is_empty() {
@@ -189,13 +189,13 @@ fn resolve(pid: u32, parent: &HashMap<u32, u32>, names: &HashMap<u32, String>, e
             break;
         }
         let exe = exe_of(up);
-        // O Explorer abre quase tudo: ligar o áudio de qualquer app a ele seria errado.
+        // Explorer opens almost everything: linking audio from any app to it would be wrong.
         if known.contains(&exe) && !exe.ends_with("\\explorer.exe") {
             return exe;
         }
         at = up;
     }
-    // Só consulta o caminho dos processos cujo nome de arquivo bate com algum exe com janela.
+    // Only queries the path of processes whose file name matches some exe with a window.
     let files: HashSet<&str> = known.iter().filter_map(|k| k.rsplit('\\').next()).collect();
     for (&child, name) in names {
         if child == pid || !files.contains(name.to_lowercase().as_str()) {
@@ -217,7 +217,7 @@ fn resolve(pid: u32, parent: &HashMap<u32, u32>, names: &HashMap<u32, String>, e
     own
 }
 
-/// Pai e nome do exe de cada processo (o nome serve quando o caminho completo não pode ser lido).
+/// Parent and exe name of each process (the name helps when full path can't be read).
 fn process_tree() -> (HashMap<u32, u32>, HashMap<u32, String>) {
     let mut map = HashMap::new();
     let mut names = HashMap::new();
@@ -255,8 +255,8 @@ fn default_device() -> Option<IMMDevice> {
     unsafe { enumerator()?.GetDefaultAudioEndpoint(eRender, eConsole).ok() }
 }
 
-/// Todas as sessões de todos os dispositivos de saída ativos, já ligadas ao programa dono.
-/// Os comandos de volume e mudo são aplicados na mesma passada.
+/// All sessions from all active output devices, already linked to owning program.
+/// Volume and mute commands are applied in the same pass.
 fn read_sessions(commands: &[Command], known: &HashSet<String>) -> Vec<Sess> {
     let (parent, names) = process_tree();
     let mut paths: HashMap<u32, String> = HashMap::new();
@@ -306,10 +306,10 @@ fn read_sessions(commands: &[Command], known: &HashSet<String>) -> Vec<Sess> {
     sessions
 }
 
-/// Um ciclo: aplica os comandos (em todos os dispositivos) e lê o estado.
+/// One cycle: applies commands (on all devices) and reads state.
 fn tick(commands: &[Command], known: &HashSet<String>) -> Snapshot {
     let sessions = read_sessions(commands, known);
-    // O volume geral é sempre o do dispositivo padrão.
+    // Master volume is always from the default device.
     let master = default_device()
         .and_then(|d| unsafe { d.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok() })
         .map(|endpoint| unsafe {
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!((apps[1].muted, apps[1].sound), (true, Sound::Idle));
     }
 
-    /// Monta uma árvore falsa: (pid, pai, caminho do exe).
+    /// Builds a fake tree: (pid, parent, exe path).
     fn fake(procs: &[(u32, u32, &str)]) -> (HashMap<u32, u32>, HashMap<u32, String>, HashMap<u32, String>) {
         let parent = procs.iter().map(|p| (p.0, p.1)).collect();
         let names = procs.iter().map(|p| (p.0, p.2.rsplit('\\').next().unwrap().to_owned())).collect();
@@ -396,21 +396,21 @@ mod tests {
         let win = ["c:\\e\\edge.exe", "c:\\w\\explorer.exe"];
         assert_eq!(owner(&procs, &win, 12), "c:\\e\\edge.exe");
         assert_eq!(owner(&procs, &win, 11), "c:\\e\\edge.exe");
-        // filho do Explorer sem janela própria não vira "Explorer"
+        // Explorer child without its own window doesn't become "Explorer"
         assert_eq!(owner(&procs, &win, 40), "c:\\x\\solto.exe");
         assert_eq!(owner(&procs, &win, 99), "pid:99");
     }
 
     #[test]
     fn apps_com_helper_agrupam_no_dono_da_janela() {
-        // Helpers (Brave, Discord, Obsidian, Telegram) tocam em filhos do exe da janela.
+        // Helpers (Brave, Discord, Obsidian, Telegram) play in children of the window exe.
         let procs = [
             (1, 0, "c:\\w\\explorer.exe"),
             (10, 1, "c:\\b\\brave.exe"), (11, 10, "c:\\b\\brave.exe"),
             (20, 1, "c:\\d\\discord.exe"), (21, 20, "c:\\d\\discord.exe"),
             (30, 1, "c:\\o\\obsidian.exe"), (31, 30, "c:\\o\\obsidian.exe"),
             (40, 1, "c:\\t\\telegram.exe"), (41, 40, "c:\\t\\telegram.exe"),
-            // Steam: o áudio é do steam.exe, a janela é do steamwebhelper (filho).
+            // Steam: audio is from steam.exe, window is from steamwebhelper (child).
             (50, 1, "c:\\s\\steam.exe"), (51, 50, "c:\\s\\steamwebhelper.exe"), (52, 51, "c:\\s\\steamwebhelper.exe"),
         ];
         let win = ["c:\\b\\brave.exe", "c:\\d\\discord.exe", "c:\\o\\obsidian.exe", "c:\\t\\telegram.exe", "c:\\s\\steamwebhelper.exe", "c:\\w\\explorer.exe"];

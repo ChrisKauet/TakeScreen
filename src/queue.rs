@@ -1,5 +1,5 @@
-//! Fila do culto: a sequência de janelas, arquivos e links a mostrar um depois do outro.
-//! Só a lógica; a interface fica em `main.rs`.
+//! Service queue: the sequence of windows, files and links to show one after another.
+//! Logic only; the UI is in `main.rs`.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +7,7 @@ use crate::win::WindowInfo;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum Kind {
-    /// Janela aberta cujo título contém este texto.
+    /// Open window whose title contains this text.
     Window(String),
     File(String),
     Url(String),
@@ -22,7 +22,7 @@ pub struct Item {
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct Queue {
     pub items: Vec<Item>,
-    /// Item mostrado por último; `None` = ainda não começou.
+    /// Item shown last; `None` = not started yet.
     pub pos: Option<usize>,
 }
 
@@ -36,7 +36,7 @@ impl Queue {
             return;
         }
         self.items.remove(i);
-        // Se o atual saiu, o próximo é o que ocupou o lugar dele.
+        // Removing current: next becomes the one that took its place.
         self.pos = match self.pos {
             Some(p) if i < p => Some(p - 1),
             Some(p) if i == p => p.checked_sub(1),
@@ -56,7 +56,7 @@ impl Queue {
         }
     }
 
-    /// Troca dois vizinhos levando o destaque junto com o item atual.
+    /// Swaps two neighbors keeping the highlight with the current item.
     fn swap(&mut self, a: usize, b: usize) {
         self.items.swap(a, b);
         self.pos = match self.pos {
@@ -66,8 +66,8 @@ impl Queue {
         };
     }
 
-    /// Avança e devolve o novo item atual. No fim da fila fica parado (devolve `None`)
-    /// até alguém clicar em Reiniciar.
+    /// Advances and returns the new current item. At the end of the queue it stops (returns `None`)
+    /// until someone clicks Restart.
     pub fn next(&mut self) -> Option<&Item> {
         let n = self.pos.map_or(0, |p| p + 1);
         if n >= self.items.len() {
@@ -82,7 +82,7 @@ impl Queue {
     }
 }
 
-/// A janela aberta que corresponde ao item (título contém, sem diferenciar maiúsculas).
+/// The open window matching the item (title contains, case insensitive).
 pub fn find_window<'a>(item: &Item, windows: &'a [WindowInfo]) -> Option<&'a WindowInfo> {
     let Kind::Window(part) = &item.kind else { return None };
     let part = part.to_lowercase();
@@ -123,7 +123,7 @@ mod tests {
         q.pos = Some(2);
         q.remove(0);
         assert_eq!((labels(&q), q.pos), (vec!["b", "c", "d"], Some(1)));
-        // Tirar o atual: o próximo passa a ser o que ocupou o lugar dele.
+        // Removing current: next becomes the one that took its place.
         q.remove(1);
         assert_eq!(q.pos, Some(0));
         assert_eq!(q.next().unwrap().label, "d");
@@ -137,7 +137,7 @@ mod tests {
         q.pos = Some(1);
         q.move_up(1);
         assert_eq!((labels(&q), q.pos), (vec!["b", "a", "c"], Some(0)));
-        q.move_up(0); // já é o primeiro
+        q.move_up(0); // already first
         assert_eq!(labels(&q), ["b", "a", "c"]);
     }
 
@@ -147,7 +147,7 @@ mod tests {
         q.pos = Some(2);
         q.move_down(1);
         assert_eq!((labels(&q), q.pos), (vec!["a", "c", "b"], Some(1)));
-        q.move_down(2); // já é o último
+        q.move_down(2); // already last
         assert_eq!(labels(&q), ["a", "c", "b"]);
     }
 

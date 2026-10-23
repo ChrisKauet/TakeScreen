@@ -1,8 +1,8 @@
-//! TakeScreen: painel do operador para escolher o que aparece no datashow (segunda tela).
+//! TakeScreen: operator panel to choose what appears on the external screen (second display).
 //!
-//! Funciona como o Modo Estúdio do OBS: em cima a PRÉVIA (o que você escolheu) e o
-//! NO AR (o que o público está vendo); embaixo os programas abertos, cada um com o
-//! ícone e uma prévia ao vivo. Um clique em EXIBIR, ou Enter, troca o que está no ar.
+//! Works like OBS Studio Mode: PREVIEW (what you chose) and ON AIR (what the audience sees)
+//! on top; open programs below, each with an icon and a live preview. One click on SHOW,
+//! or Enter, swaps what is on air.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -31,34 +31,34 @@ const CARD_W: f32 = 220.0;
 const CARD_HEADER: f32 = 30.0;
 const NO_DATASHOW: &str = "O datashow não está conectado (ou é a mesma tela do painel). Nada foi coberto.";
 
-/// O que fica salvo entre uma abertura e outra.
+/// What is saved between sessions.
 #[derive(Serialize, Deserialize, Default)]
 struct Config {
-    /// Nome do aparelho escolhido como datashow (por exemplo "EPSON PJ").
+    /// Name of the device chosen as the external screen (e.g. "EPSON PJ").
     datashow_name: Option<String>,
     datashow_device: Option<String>,
-    /// A proteção do datashow vem ligada; isto só fica true se o operador desligar.
+    /// External screen protection starts on; this only becomes true if the operator turns it off.
     #[serde(default)]
     protection_off: bool,
-    /// Imagem mostrada no datashow quando nada está no ar (`None` = tela preta).
+    /// Image shown on the external screen when nothing is on air (`None` = black screen).
     #[serde(default)]
     standby_image: Option<String>,
     #[serde(default)]
     queue: queue::Queue,
-    /// "Próximo" da fila já faz EXIBIR, sem parar na PRÉVIA.
+    /// "Next" in the queue goes straight to SHOW, without stopping at PREVIEW.
     #[serde(default)]
     queue_take: bool,
     #[serde(default)]
     side_closed: bool,
 }
 
-/// Id do volume geral nos controles do mixer (as sessões de áudio têm ids do Windows).
+/// Master volume ID in mixer controls (audio sessions have Windows IDs).
 const MASTER_ID: &str = "";
 
-/// Maior imagem de espera guardada na memória: datashow 4K.
+/// Largest standby image kept in memory: 4K external screen.
 const STANDBY_MAX: (u32, u32) = (3840, 2160);
 
-/// Onde cada miniatura do Windows deve ser desenhada neste quadro.
+/// Where each Windows thumbnail should be drawn in this frame.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Slot {
     Preview,
@@ -73,7 +73,7 @@ struct App {
     monitors: Vec<Monitor>,
     datashow: usize,
     windows: Vec<WindowInfo>,
-    /// Janelas na ordem em que apareceram: os cartões não trocam de lugar quando o foco muda.
+    /// Windows in the order they appeared: cards don't swap when focus changes.
     order: Vec<Hwnd>,
     icons: HashMap<Hwnd, Option<egui::TextureHandle>>,
     last_refresh: Instant,
@@ -81,16 +81,16 @@ struct App {
     fit: Fit,
     on_air: Option<Saved>,
     thumbs: HashMap<Slot, Thumbnail>,
-    /// Áreas (em pixels físicos) e recorte de cada miniatura, montados durante o desenho da tela.
+    /// Areas (in physical pixels) and crop of each thumbnail, built during screen drawing.
     placed: Vec<(Slot, win::Rect, win::Rect)>,
     status: String,
-    /// Título e programa do cartão sob o mouse, mostrados na barra de status.
+    /// Title and program of the card under the mouse, shown in the status bar.
     hovered_card: Option<String>,
-    /// Alguma dica (tooltip) está aberta: as miniaturas, que ficam por cima de tudo, se escondem.
+    /// A tooltip is open: thumbnails, which stay on top of everything, hide.
     tip_open: bool,
     media: media::Hub,
     mixer: mixer::Hub,
-    /// Slider do mixer que o operador está mexendo: o valor lido do Windows não passa por cima dele.
+    /// Mixer slider the operator is dragging: the value read from Windows doesn't overwrite it.
     vol_edit: Option<(String, f32, Instant)>,
     url_input: String,
 }
@@ -138,7 +138,7 @@ impl App {
         app
     }
 
-    /// Carrega a imagem de espera escolhida; se não der, avisa e fica a tela preta.
+    /// Loads the chosen standby image; if it fails, warns and leaves black screen.
     fn apply_standby(&mut self) {
         let Some(path) = self.cfg.standby_image.clone() else {
             win::set_standby(self.curtain, None);
@@ -172,7 +172,7 @@ impl App {
         self.status = "Imagem de espera: tela preta.".into();
     }
 
-    /// O datashow é uma tela separada: há 2 monitores ou mais e o painel não está nele.
+    /// The external screen is separate: there are 2 or more monitors and the panel isn't on it.
     fn datashow_separate(&self) -> bool {
         let Some(ds) = self.datashow_monitor() else { return false };
         self.monitors.len() >= 2 && !self.me.and_then(win::visible_rect).is_some_and(|r| ds.holds(&r))
@@ -186,7 +186,7 @@ impl App {
         self.on_air.map(|s| s.hwnd)
     }
 
-    /// Reencontra o datashow pelo nome do aparelho, mesmo que a ordem dos monitores tenha mudado.
+    /// Re-finds the external screen by device name, even if monitor order changed.
     fn refresh_monitors(&mut self) {
         let before = self.datashow_monitor().map(|m| m.rect);
         self.monitors = win::list_monitors();
@@ -223,7 +223,7 @@ impl App {
         self.keep_me_off_datashow();
     }
 
-    /// O monitor para onde as janelas voltam: o do painel, ou o principal.
+    /// The monitor windows return to: the panel's, or the primary.
     fn home_monitor(&self) -> Option<&Monitor> {
         let ds = self.datashow_monitor()?;
         let mine = self.me.and_then(win::visible_rect);
@@ -234,7 +234,7 @@ impl App {
             .or_else(|| others().next())
     }
 
-    /// Diz à proteção qual é o datashow e quais janelas podem estar nele.
+    /// Tells the guard which is the external screen and which windows can be there.
     fn sync_guard(&self, entering: Option<Hwnd>) {
         let (Some(ds), Some(home)) = (self.datashow_monitor(), self.home_monitor()) else {
             win::guard_configure(false, win::Rect::default(), win::Rect::default(), &[], None);
@@ -244,7 +244,7 @@ impl App {
         win::guard_configure(!self.cfg.protection_off, ds.rect, home.work, &allowed, self.curtain);
     }
 
-    /// Se a janela que saiu do ar tinha sido aberta no datashow, ela não volta para lá.
+    /// If the window that left ON AIR was opened on the external screen, it doesn't go back there.
     fn send_off_datashow(&self, hwnd: Hwnd) {
         let (Some(ds), Some(home)) = (self.datashow_monitor(), self.home_monitor()) else { return };
         if win::visible_rect(hwnd).is_some_and(|r| ds.holds(&r)) {
@@ -260,7 +260,7 @@ impl App {
         }
     }
 
-    /// O painel nunca deve aparecer no datashow.
+    /// The panel must never appear on the external screen.
     fn keep_me_off_datashow(&self) {
         let (Some(me), Some(ds)) = (self.me, self.datashow_monitor()) else { return };
         let Some(r) = win::visible_rect(me) else { return };
@@ -279,7 +279,7 @@ impl App {
         self.windows.sort_by_key(|w| order.iter().position(|h| *h == w.hwnd));
         if let Some(s) = self.on_air {
             if !s.hwnd.exists() {
-                // A janela no ar foi fechada: a cortina preta já está logo atrás dela.
+                // The ON AIR window was closed: the black curtain is already right behind it.
                 self.on_air = None;
                 win::remember_on_air(None);
                 self.status = "A janela que estava no ar foi fechada. O datashow está preto.".into();
@@ -311,7 +311,7 @@ impl App {
         self.windows.iter().find(|w| w.hwnd == hwnd).map(|w| w.title.clone()).unwrap_or_default()
     }
 
-    /// EXIBIR: a prévia vai para o ar e a janela que estava no ar volta para a tela 1.
+    /// SHOW: preview goes on air and the window that was on air returns to screen 1.
     fn take(&mut self) {
         let (Some(target), Some(curtain), Some(ds)) = (self.preview, self.curtain, self.datashow_monitor().cloned()) else {
             return;
@@ -348,7 +348,7 @@ impl App {
     /// LIMPAR: cortina preta na frente e a janela volta para a tela 1.
     fn clear(&mut self) {
         let separate = self.datashow_separate();
-        // Com um monitor só, a cortina cobriria o próprio painel.
+        // With a single monitor, the curtain would cover the panel itself.
         if let (true, Some(c), Some(ds)) = (separate, self.curtain, self.datashow_monitor()) {
             win::place_curtain(c, ds.rect, true);
         }
@@ -367,13 +367,21 @@ impl App {
         }
     }
 
-    fn fullscreen_key(&mut self) {
+    /// Presses `vk` on the ON AIR window; `hint` goes to status bar if key was sent.
+    fn press_on_air(&mut self, vk: win::VIRTUAL_KEY, hint: Option<&str>) {
         if let (Some(s), Some(me)) = (self.on_air, self.me) {
-            win::send_key(s.hwnd, win::VK_FULLSCREEN, me);
+            match win::press_key_on(s.hwnd, vk, me) {
+                Ok(()) => {
+                    if let Some(h) = hint {
+                        self.status = h.into();
+                    }
+                }
+                Err(e) => self.status = e,
+            }
         }
     }
 
-    /// Próximo da fila: janela vai para a PRÉVIA (e para o ar, se marcado); arquivo e link abrem no programa padrão.
+    /// Next in queue: window goes to PREVIEW (and to air if marked); file and link open in default program.
     fn queue_next(&mut self) {
         let Some(item) = self.cfg.queue.next().cloned() else {
             self.status = if self.cfg.queue.items.is_empty() {
@@ -422,7 +430,7 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
-    // Miniaturas ao vivo
+    // Live thumbnails
 
     fn source_of(&self, slot: Slot) -> Option<Hwnd> {
         match slot {
@@ -432,7 +440,7 @@ impl App {
         }
     }
 
-    /// Mostra as miniaturas nos lugares desenhados neste quadro e esconde as demais.
+    /// Shows thumbnails in the places drawn this frame and hides the rest.
     fn apply_thumbnails(&mut self, popup_open: bool) {
         let Some(me) = self.me else { return };
         let placed = std::mem::take(&mut self.placed);
@@ -447,7 +455,7 @@ impl App {
                 };
             }
             let t = &self.thumbs[&slot];
-            // O Windows desenha as miniaturas por cima de tudo, inclusive de menus abertos.
+            // Windows draws thumbnails on top of everything, including open menus.
             if popup_open {
                 t.hide();
             } else {
@@ -498,14 +506,14 @@ impl App {
         });
     }
 
-    /// Desenha um quadro (PRÉVIA ou NO AR) com a miniatura dentro.
+    /// Draws a frame (PREVIEW or ON AIR) with the thumbnail inside.
     fn screen_box(&mut self, ui: &mut egui::Ui, slot: Slot, title: &str, color: egui::Color32, caption: &str, width: f32) {
         ui.label(egui::RichText::new(title).strong().color(color).size(16.0));
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, width * 9.0 / 16.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 4.0, egui::Color32::BLACK);
         ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(3.0, color), egui::StrokeKind::Outside);
         ui.add(egui::Label::new(egui::RichText::new(caption).weak()).truncate());
-        // Recorta no painel central: se a janela for estreita, a miniatura não invade a barra lateral.
+        // Crops to the central panel: if the window is narrow, the thumbnail doesn't invade the sidebar.
         let clip = to_px(ui.clip_rect(), ui.ctx());
         self.placed.push((slot, to_px(rect.shrink(1.0), ui.ctx()), clip));
     }
@@ -513,7 +521,7 @@ impl App {
     fn studio(&mut self, ui: &mut egui::Ui, max_height: f32) {
         let gap = 140.0;
         let spacing = ui.spacing().item_spacing.x;
-        // Duas telas, a coluna do botão, os espaços entre elas e a borda das molduras.
+        // Two screens, the button column, the spaces between them and the frame borders.
         let by_width = (ui.available_width() - gap - 2.0 * spacing - 16.0) / 2.0;
         let by_height = (max_height - 80.0) * 16.0 / 9.0;
         let width = by_width.min(by_height).max(120.0);
@@ -555,7 +563,10 @@ impl App {
                 self.screen_box(ui, Slot::Air, "NO AR", AIR_COLOR, &air_caption, width);
                 ui.horizontal(|ui| {
                     if ui.add_enabled(air.is_some(), egui::Button::new("Tela cheia do programa (F11)")).clicked() {
-                        self.fullscreen_key();
+                        self.press_on_air(win::VK_FULLSCREEN, None);
+                    }
+                    if ui.add_enabled(air.is_some(), egui::Button::new("Vídeo em tela cheia (F)")).clicked() {
+                        self.press_on_air(win::VK_VIDEO_FULLSCREEN, Some("Se o vídeo não mudou, clique uma vez no vídeo na tela dele e tente de novo."));
                     }
                     if ui.button("Limpar datashow (Esc)").clicked() {
                         self.clear();
@@ -605,7 +616,7 @@ impl App {
         }
     }
 
-    /// Um cartão: ícone e nome do programa em cima, prévia ao vivo embaixo.
+    /// A card: icon and program name on top, live preview below.
     fn card(&mut self, ui: &mut egui::Ui, w: &WindowInfo, clip: win::Rect) -> egui::Response {
         let thumb_h = CARD_W * 9.0 / 16.0;
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(CARD_W, CARD_HEADER + thumb_h + 6.0), egui::Sense::click());
@@ -653,7 +664,7 @@ impl App {
         let thumb = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, CARD_HEADER), egui::vec2(CARD_W - 12.0, thumb_h - 6.0));
         painter.rect_filled(thumb, 3.0, egui::Color32::BLACK);
         if w.minimized {
-            // Janela minimizada não tem imagem para mostrar: fica o ícone grande.
+            // Minimized window has no image to show: shows the large icon.
             let big = egui::Rect::from_center_size(thumb.center() - egui::vec2(0.0, 8.0), egui::vec2(48.0, 48.0));
             if let Some(t) = icon {
                 painter.image(t.id(), big, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
@@ -662,12 +673,12 @@ impl App {
         } else {
             self.placed.push((Slot::Card(w.hwnd), to_px(thumb, ui.ctx()), clip));
         }
-        // Sem dica flutuante: a miniatura do Windows ficaria por cima dela. Título e programa vão para a barra de status.
+        // No floating tooltip: Windows thumbnail would be on top of it. Title and program go to status bar.
         resp
     }
 
     // -----------------------------------------------------------------------
-    // Barra lateral: fila, mídia e mixer
+    // Sidebar: queue, media and mixer
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -788,7 +799,7 @@ impl App {
             });
             ui.separator();
         }
-        // Players sem controle de mídia do Windows ainda entendem a tecla tocar/pausar enviada à janela.
+        // Players without Windows media control still understand the play/pause key sent to the window.
         if let Some(h) = self.on_air_hwnd() {
             if ui.button("⏯ Tocar/pausar a janela NO AR").clicked() && !media::send_to_window(h, media::MediaCmd::Toggle) {
                 self.status = "Não consegui mandar tocar/pausar para a janela no ar.".into();
@@ -806,7 +817,7 @@ impl App {
         let (master, master_muted) = self.mixer.master();
         self.volume_row(ui, MASTER_ID, "Volume geral", master, master_muted, None, true);
         ui.separator();
-        // Um programa por exe, com o nome do primeiro cartão dele.
+        // One program per exe, with the name of its first card.
         let mut programs: Vec<(String, String)> = Vec::new();
         for w in &self.windows {
             if !programs.iter().any(|(p, _)| p.eq_ignore_ascii_case(&w.exe_path)) {
@@ -825,7 +836,7 @@ impl App {
         ui.label(egui::RichText::new("Navegadores têm um controle só para todas as abas.").small().weak());
     }
 
-    /// Nome, botão mudo, slider de 0 a 100 e, para os programas, a barrinha de nível.
+    /// Name, mute button, 0-100 slider, and for programs, the level bar.
     fn volume_row(&mut self, ui: &mut egui::Ui, id: &str, name: &str, volume: f32, muted: bool, peak: Option<f32>, enabled: bool) {
         ui.add(egui::Label::new(name).truncate());
         ui.add_enabled_ui(enabled, |ui| ui.horizontal(|ui| {
@@ -864,10 +875,10 @@ impl App {
     }
 
     fn keyboard(&mut self, ctx: &egui::Context) {
-        // Com um menu aberto (lista de monitores), Esc e Enter são dele, não do datashow.
-        // O `ctx.any_popup_open()` só conhece os menus depois que a tela é desenhada, e o
-        // teclado é lido antes disso. A memória do egui guarda o menu aberto entre um quadro e outro.
-        // Digitando um link na fila: as teclas são do campo de texto.
+            // With a menu open (monitor list), Esc and Enter belong to it, not the external screen.
+            // `ctx.any_popup_open()` only knows menus after the frame is drawn, and the
+            // keyboard is read before that. egui's memory keeps the open menu between frames.
+            // Typing a link in the queue: keys belong to the text field.
         if egui::Popup::is_any_open(ctx) || ctx.text_edit_focused() {
             return;
         }
@@ -914,8 +925,8 @@ fn to_px(r: egui::Rect, ctx: &egui::Context) -> win::Rect {
     }
 }
 
-/// Usa a fonte do Windows (Segoe UI), com os símbolos e emojis como reserva,
-/// para os títulos das janelas aparecerem certos.
+/// Uses the Windows font (Segoe UI), with symbols and emojis as fallback,
+/// so window titles appear correctly.
 fn install_fonts(ctx: &egui::Context) {
     use egui::epaint::text::{FontData, FontInsert, FontPriority, InsertFontFamily};
     let dir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
@@ -963,7 +974,7 @@ impl eframe::App for App {
             self.select(h);
             self.status = format!("A apresentação {} abriu no datashow e está na PRÉVIA. Aperte EXIBIR para mostrar.", self.title_of(h));
         }
-        // O cartão sob o mouse é medido durante o desenho; mostra o do quadro anterior.
+        // The card under the pointer is measured while drawing; this shows the previous frame's.
         let hovered = self.hovered_card.take();
         self.tip_open = false;
 
@@ -1015,7 +1026,7 @@ impl eframe::App for App {
     }
 }
 
-/// Junta à `order` as janelas novas (no fim) e tira as que fecharam.
+/// Adds to `order` the new windows (at the end) and removes the ones that closed.
 fn track_order(order: &mut Vec<Hwnd>, alive: &[Hwnd]) {
     order.retain(|h| alive.contains(h));
     for h in alive {
@@ -1025,7 +1036,7 @@ fn track_order(order: &mut Vec<Hwnd>, alive: &[Hwnd]) {
     }
 }
 
-/// Link digitado na fila: sem espaços, e só http/https (o Windows abriria qualquer programa).
+/// Link typed in queue: no spaces, and only http/https (Windows would open any program).
 fn normalize_url(s: &str) -> Option<String> {
     let s = s.trim();
     if s.is_empty() || s.contains(char::is_whitespace) {
@@ -1041,8 +1052,8 @@ fn normalize_url(s: &str) -> Option<String> {
     }
 }
 
-/// Abre a imagem de espera (PNG ou JPEG), reduz para caber em 3840x2160 mantendo a
-/// proporção e devolve o tamanho e os pixels em RGBA, de cima para baixo.
+/// Opens the standby image (PNG or JPEG), resizes to fit 3840x2160 preserving
+/// aspect ratio, and returns the size and pixels in RGBA, top to bottom.
 fn load_standby(path: &str) -> Result<([usize; 2], Vec<u8>), String> {
     let img = image::open(path).map_err(|e| e.to_string())?;
     let (max_w, max_h) = STANDBY_MAX;
@@ -1059,7 +1070,7 @@ fn main() -> eframe::Result {
     if let Some(code) = selftest::run_from_args() {
         std::process::exit(code);
     }
-    // Se o programa der erro, a janela no ar volta para a tela 1 antes de fechar.
+    // If the program crashes, the ON AIR window returns to screen 1 before closing.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         win::recover_now();

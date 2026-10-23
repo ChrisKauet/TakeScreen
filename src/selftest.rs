@@ -1,16 +1,18 @@
-//! Autoteste sem cliques, para conferir a troca de janelas no datashow de verdade:
+//! Click-free self-test that verifies window switching on the real projector:
 //!
-//! `TakeScreen.exe --selftest "<trecho do título>" [--fit borderless|maximize]`
-//! `TakeScreen.exe --seq "A|B|C" [--fit ...]` (troca no ar A -> B -> C, como na interface)
-//! `TakeScreen.exe --inspect "<trecho do título>"` (só descreve, não move nada; "*" para todas)
+//! `TakeScreen.exe --selftest "<title fragment>" [--fit borderless|maximize]`
+//! `TakeScreen.exe --seq "A|B|C" [--fit ...]` (switches the live window A -> B -> C, as the interface does)
+//! `TakeScreen.exe --inspect "<title fragment>"` (only describes, moves nothing; "*" for all windows)
+//! `--press f` (or `f11`): with the last window live, presses the key twice through `press_key_on`.
+//! If the title contains "FS-OFF" (test page), verifies that it becomes "FS-ON" and then reverts.
 //!
-//! Imprime uma linha por verificação e sai com código diferente de zero se alguma falhar.
+//! Prints one line per check and exits with a nonzero code if any check fails.
 
 use std::time::{Duration, Instant};
 
 use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
 
-use crate::win::{self, Fit, Hwnd, Monitor, Rect, Saved, WinState, WindowInfo};
+use crate::win::{self, Fit, Hwnd, Monitor, Rect, Saved, WinState, WindowInfo, VIRTUAL_KEY};
 
 const TOL: i32 = 2;
 
@@ -30,7 +32,12 @@ pub fn run_from_args() -> Option<i32> {
         Some("borderless") => Some(Fit::Borderless),
         _ => None,
     };
-    Some(selftest(&seq, fit))
+    let press = val("--press").map(|k| match k.to_lowercase().as_str() {
+        "f" => win::VK_VIDEO_FULLSCREEN,
+        "f11" => win::VK_FULLSCREEN,
+        k => VIRTUAL_KEY(k.to_uppercase().chars().next().unwrap_or('F') as u16),
+    });
+    Some(selftest(&seq, fit, press))
 }
 
 fn find(part: &str) -> Option<WindowInfo> {
@@ -55,7 +62,7 @@ fn inspect(part: &str) -> i32 {
     0
 }
 
-/// Espera sem travar a cortina (ela é deste processo e precisa se pintar).
+/// Waits without blocking the curtain (it belongs to this process and must paint itself).
 fn wait(ms: u64) {
     let end = Instant::now() + Duration::from_millis(ms);
     while Instant::now() < end {
@@ -75,8 +82,10 @@ fn fmt(s: &WinState) -> String {
     format!("rect={r} minimizada={} maximizada={} visivel={} cloaked={}", s.iconic, s.zoomed, s.visible, s.cloaked)
 }
 
-fn selftest(seq: &[String], fit: Option<Fit>) -> i32 {
+fn selftest(seq: &[String], fit: Option<Fit>, press: Option<VIRTUAL_KEY>) -> i32 {
     win::dpi_aware();
+    // The window that currently holds the keyboard plays the role of the panel: focus must return to it.
+    let panel = win::foreground();
     let mons = win::list_monitors();
     let (Some(ds), Some(home)) = (mons.iter().find(|m| !m.primary).cloned(), mons.iter().find(|m| m.primary).cloned()) else {
         println!("FALHA o autoteste precisa de 2 monitores");
@@ -105,7 +114,7 @@ fn selftest(seq: &[String], fit: Option<Fit>) -> i32 {
                 println!("ERRO take \"{}\" ({} ms): {e}", w.title, t0.elapsed().as_millis());
                 wait(800);
                 let now = win::state(w.hwnd);
-                // Mesmo com erro, a janela não pode sumir.
+                // Even on error, the window must not disappear.
                 let ok = !before.shown() || (now.shown() && now.rect.is_some_and(|r| on_some(&r, &mons)));
                 println!("{} depois do erro a janela continua à vista: {}", tag(ok), fmt(&now));
                 fails += !ok as i32 + 1;
@@ -119,6 +128,9 @@ fn selftest(seq: &[String], fit: Option<Fit>) -> i32 {
                 fails += check_air(w.hwnd, &w.title, &ds, &mons);
             }
         }
+    }
+    if let (Some(vk), Some((s, _, _))) = (press, on_air.as_ref()) {
+        fails += press_test(s.hwnd, vk, panel);
     }
     if let Some((old, title, b)) = on_air {
         fails += give_back(&old, &title, &b, &ds, &home, &mons);
@@ -146,7 +158,7 @@ fn check_air(h: Hwnd, title: &str, ds: &Monitor, mons: &[Monitor]) -> i32 {
     let spill: i32 = s.rect.map_or(0, |r| {
         mons.iter().filter(|m| m.device != ds.device).map(|m| r.overlap_area(&m.rect)).sum()
     });
-    // Maximizada só alcança a área útil; a barra de tarefas do datashow, se houver, fica à vista.
+    // A maximized window only reaches the work area; the projector taskbar, if any, remains visible.
     let covers_work = s.rect.is_some_and(|r| win::covers_within(&r, &ds.work, TOL));
     let ok = s.shown() && (covers || (s.zoomed && covers_work));
     let note = if ok && !covers { " AVISO barra de tarefas do datashow visivel" } else { "" };
@@ -154,7 +166,7 @@ fn check_air(h: Hwnd, title: &str, ds: &Monitor, mons: &[Monitor]) -> i32 {
     !ok as i32
 }
 
-/// O que a interface faz com a janela que sai do ar: `restore` e, se ficou no datashow, manda para casa.
+/// What the interface does with the window going off air: `restore` and, if it stayed on the projector, send it home.
 fn give_back(old: &Saved, title: &str, before: &WinState, ds: &Monitor, home: &Monitor, mons: &[Monitor]) -> i32 {
     win::restore(old);
     let right_after = win::state(old.hwnd);
@@ -179,4 +191,23 @@ fn give_back(old: &Saved, title: &str, before: &WinState, ds: &Monitor, home: &M
         fmt(&s)
     );
     !ok as i32
+}
+
+/// Presses the key twice on the live window: toggles full screen on and off on the test page.
+fn press_test(h: Hwnd, vk: VIRTUAL_KEY, panel: Hwnd) -> i32 {
+    let marked = win::title(h).contains("FS-OFF");
+    let mut fails = 0;
+    for expect in ["FS-ON", "FS-OFF"] {
+        let t0 = Instant::now();
+        let sent = win::press_key_on(h, vk, panel);
+        let ms = t0.elapsed().as_millis();
+        wait(800);
+        let title = win::title(h);
+        let back = win::foreground() == panel;
+        let ok = sent.is_ok() && back && (!marked || title.contains(expect));
+        let want = if marked { expect } else { "-" };
+        println!("{} tecla ({ms} ms): enviada={sent:?} titulo=\"{title}\" esperado={want} foco_voltou={back}", tag(ok));
+        fails += !ok as i32;
+    }
+    fails
 }
