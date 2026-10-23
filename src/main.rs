@@ -1249,7 +1249,13 @@ impl eframe::App for App {
                 None if self.status.is_empty() => "Pronto.",
                 None => &self.status,
             };
-            ui.add(egui::Label::new(text).truncate());
+            // Version is laid out first from the right, so the status text truncates before overlapping it.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(concat!("TakeScreen v", env!("CARGO_PKG_VERSION")));
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(text).truncate());
+                });
+            });
         });
         // A barra lateral vem antes do painel central, que encolhe: as miniaturas do Windows nunca ficam por cima dela.
         if !self.cfg.side_closed {
