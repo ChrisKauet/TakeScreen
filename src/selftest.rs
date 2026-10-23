@@ -32,12 +32,16 @@ pub fn run_from_args() -> Option<i32> {
         Some("borderless") => Some(Fit::Borderless),
         _ => None,
     };
-    let press = val("--press").map(|k| match k.to_lowercase().as_str() {
+    let press = val("--press").map(|k| key_of(&k));
+    Some(selftest(&seq, fit, press))
+}
+
+fn key_of(k: &str) -> VIRTUAL_KEY {
+    match k.to_lowercase().as_str() {
         "f" => win::VK_VIDEO_FULLSCREEN,
         "f11" => win::VK_FULLSCREEN,
         k => VIRTUAL_KEY(k.to_uppercase().chars().next().unwrap_or('F') as u16),
-    });
-    Some(selftest(&seq, fit, press))
+    }
 }
 
 fn find(part: &str) -> Option<WindowInfo> {
@@ -98,7 +102,21 @@ fn selftest(seq: &[String], fit: Option<Fit>, press: Option<VIRTUAL_KEY>) -> i32
     };
     let mut fails = 0;
     let mut on_air: Option<(Saved, String, WinState)> = None;
+    let mut toggled = Vec::new();
     for part in seq {
+        // A "key:<k>" step presses the key on the live window, as the panel buttons do.
+        if let Some(k) = part.strip_prefix("key:") {
+            if let Some((s, _, _)) = on_air.as_ref() {
+                let sent = win::press_key_on(s.hwnd, key_of(k), panel);
+                if sent.is_ok() {
+                    win::toggle_key(&mut toggled, key_of(k));
+                }
+                wait(1500);
+                println!("{} tecla \"{k}\": enviada={sent:?} titulo=\"{}\"", tag(sent.is_ok()), win::title(s.hwnd));
+                fails += sent.is_err() as i32;
+            }
+            continue;
+        }
         let Some(w) = find(part) else {
             println!("FALHA \"{part}\": janela não encontrada");
             fails += 1;
@@ -107,6 +125,10 @@ fn selftest(seq: &[String], fit: Option<Fit>, press: Option<VIRTUAL_KEY>) -> i32
         let before = win::state(w.hwnd);
         let fit = fit.unwrap_or(if w.uwp { Fit::Maximize } else { Fit::Borderless });
         println!("TAKE \"{}\" fit={fit:?} antes: {}", w.title, fmt(&before));
+        // Same as the panel: undo the full screen keys before the live window leaves the air.
+        if let Some((s, _, _)) = on_air.as_ref() {
+            win::undo_keys(s.hwnd, std::mem::take(&mut toggled), panel);
+        }
         let cover = on_air.as_ref().map_or(curtain, |(s, _, _)| s.hwnd);
         let t0 = Instant::now();
         match win::take(w.hwnd, cover, curtain, ds.rect, fit) {
@@ -133,6 +155,7 @@ fn selftest(seq: &[String], fit: Option<Fit>, press: Option<VIRTUAL_KEY>) -> i32
         fails += press_test(s.hwnd, vk, panel);
     }
     if let Some((old, title, b)) = on_air {
+        win::undo_keys(old.hwnd, toggled, panel);
         fails += give_back(&old, &title, &b, &ds, &home, &mons);
     }
     win::destroy(curtain);

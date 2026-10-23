@@ -998,6 +998,34 @@ pub const VK_FULLSCREEN: VIRTUAL_KEY = VK_F11;
 /// Video full screen on YouTube, Vimeo, Twitch, Netflix and most HTML5 players.
 pub const VK_VIDEO_FULLSCREEN: VIRTUAL_KEY = VK_F;
 
+/// The key that undoes `vk`: F11 toggles itself, while Esc always leaves HTML5 full screen
+/// (pressing F again would re-enter it if the operator had already left it on the page).
+pub fn undo_key(vk: VIRTUAL_KEY) -> VIRTUAL_KEY {
+    if vk == VK_VIDEO_FULLSCREEN { VK_ESCAPE } else { vk }
+}
+
+/// Records one press of `vk`: a second press undoes the first.
+pub fn toggle_key(keys: &mut Vec<VIRTUAL_KEY>, vk: VIRTUAL_KEY) {
+    match keys.iter().position(|k| *k == vk) {
+        Some(i) => {
+            keys.remove(i);
+        }
+        None => keys.push(vk),
+    }
+}
+
+/// Presses the undo key of each entry in `keys` on `target`, latest first, and returns focus to `back_to`.
+pub fn undo_keys(target: Hwnd, keys: Vec<VIRTUAL_KEY>, back_to: Hwnd) {
+    if keys.is_empty() || !target.exists() {
+        return;
+    }
+    for vk in keys.into_iter().rev() {
+        let _ = press_key_on(target, undo_key(vk), back_to);
+    }
+    // shortcut: fixed wait for the program to leave full screen; poll its rect if 300 ms proves short.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
 // ---------------------------------------------------------------------------
 // Live previews: Windows itself (DWM) draws the source window inside
 // our panel, at no CPU cost to the program.

@@ -93,6 +93,8 @@ struct App {
     /// Mixer slider the operator is dragging: the value read from Windows doesn't overwrite it.
     vol_edit: Option<(String, f32, Instant)>,
     url_input: String,
+    /// Full screen keys pressed an odd number of times on the ON AIR window.
+    toggled: Vec<win::VIRTUAL_KEY>,
 }
 
 impl App {
@@ -129,6 +131,7 @@ impl App {
             }),
             vol_edit: None,
             url_input: String::new(),
+            toggled: Vec::new(),
         };
         if let Some(title) = win::recover_previous() {
             app.status = format!("\"{title}\" tinha ficado no datashow quando o TakeScreen fechou e foi devolvida para a tela 1.");
@@ -281,6 +284,7 @@ impl App {
             if !s.hwnd.exists() {
                 // The ON AIR window was closed: the black curtain is already right behind it.
                 self.on_air = None;
+                self.toggled.clear();
                 win::remember_on_air(None);
                 self.status = "A janela que estava no ar foi fechada. O datashow está preto.".into();
             }
@@ -323,6 +327,7 @@ impl App {
             self.status = NO_DATASHOW.into();
             return;
         }
+        self.leave_fullscreen();
         self.sync_guard(Some(target));
         let cover = self.on_air_hwnd().unwrap_or(curtain);
         let saved = match win::take(target, cover, curtain, ds.rect, self.fit) {
@@ -348,6 +353,8 @@ impl App {
     /// LIMPAR: cortina preta na frente e a janela volta para a tela 1.
     fn clear(&mut self) {
         let separate = self.datashow_separate();
+        // Before the curtain comes up, so the window does not jump in front of it.
+        self.leave_fullscreen();
         // With a single monitor, the curtain would cover the panel itself.
         if let (true, Some(c), Some(ds)) = (separate, self.curtain, self.datashow_monitor()) {
             win::place_curtain(c, ds.rect, true);
@@ -372,6 +379,7 @@ impl App {
         if let (Some(s), Some(me)) = (self.on_air, self.me) {
             match win::press_key_on(s.hwnd, vk, me) {
                 Ok(()) => {
+                    win::toggle_key(&mut self.toggled, vk);
                     if let Some(h) = hint {
                         self.status = h.into();
                     }
@@ -382,6 +390,15 @@ impl App {
     }
 
     /// Next in queue: window goes to PREVIEW (and to air if marked); file and link open in default program.
+    /// Undoes the full screen keys before the window leaves ON AIR: a browser left in full screen
+    /// keeps re-entering it wherever it goes, covering screen 1 and hiding the next window.
+    fn leave_fullscreen(&mut self) {
+        let keys = std::mem::take(&mut self.toggled);
+        if let (Some(s), Some(me)) = (self.on_air, self.me) {
+            win::undo_keys(s.hwnd, keys, me);
+        }
+    }
+
     fn queue_next(&mut self) {
         let Some(item) = self.cfg.queue.next().cloned() else {
             self.status = if self.cfg.queue.items.is_empty() {
@@ -1089,6 +1106,17 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn teclas_de_tela_cheia_sao_desfeitas_ao_sair_do_ar() {
+        let mut keys = Vec::new();
+        win::toggle_key(&mut keys, win::VK_VIDEO_FULLSCREEN);
+        win::toggle_key(&mut keys, win::VK_FULLSCREEN);
+        win::toggle_key(&mut keys, win::VK_FULLSCREEN);
+        assert_eq!(keys, [win::VK_VIDEO_FULLSCREEN]);
+        assert_ne!(win::undo_key(win::VK_VIDEO_FULLSCREEN), win::VK_VIDEO_FULLSCREEN);
+        assert_eq!(win::undo_key(win::VK_FULLSCREEN), win::VK_FULLSCREEN);
+    }
 
     #[test]
     fn cartoes_ficam_na_ordem_de_chegada() {
