@@ -13,6 +13,7 @@ mod queue;
 mod win;
 mod media;
 mod mixer;
+mod selftest;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -324,9 +325,13 @@ impl App {
         }
         self.sync_guard(Some(target));
         let cover = self.on_air_hwnd().unwrap_or(curtain);
-        let Some(saved) = win::take(target, cover, curtain, ds.rect, self.fit) else {
-            self.status = "Não consegui mover essa janela. Ela ainda está aberta?".into();
-            return;
+        let saved = match win::take(target, cover, curtain, ds.rect, self.fit) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = e;
+                self.sync_guard(None);
+                return;
+            }
         };
         win::remember_on_air(Some(&saved));
         if let Some(old) = self.on_air.replace(saved) {
@@ -799,22 +804,31 @@ impl App {
             self.vol_edit = None;
         }
         let (master, master_muted) = self.mixer.master();
-        self.volume_row(ui, MASTER_ID, "Volume geral", master, master_muted, None);
+        self.volume_row(ui, MASTER_ID, "Volume geral", master, master_muted, None, true);
         ui.separator();
-        let apps = self.mixer.apps();
-        if apps.is_empty() {
-            ui.label(egui::RichText::new("Nenhum programa com som agora.").weak());
+        // Um programa por exe, com o nome do primeiro cartão dele.
+        let mut programs: Vec<(String, String)> = Vec::new();
+        for w in &self.windows {
+            if !programs.iter().any(|(p, _)| p.eq_ignore_ascii_case(&w.exe_path)) {
+                programs.push((w.exe_path.clone(), w.title.clone()));
+            }
         }
-        for a in &apps {
-            self.volume_row(ui, &a.id, &a.name, a.volume, a.muted, Some(a.peak));
+        self.mixer.set_known(&programs.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+        for a in mixer::rows(self.mixer.apps(), &programs) {
+            let name = match a.sound {
+                mixer::Sound::Playing => a.name.clone(),
+                mixer::Sound::Idle => format!("{} (parado)", a.name),
+                mixer::Sound::None => format!("{} (sem áudio no momento)", a.name),
+            };
+            self.volume_row(ui, &a.id, &name, a.volume, a.muted, Some(a.peak), a.sound != mixer::Sound::None);
         }
         ui.label(egui::RichText::new("Navegadores têm um controle só para todas as abas.").small().weak());
     }
 
     /// Nome, botão mudo, slider de 0 a 100 e, para os programas, a barrinha de nível.
-    fn volume_row(&mut self, ui: &mut egui::Ui, id: &str, name: &str, volume: f32, muted: bool, peak: Option<f32>) {
+    fn volume_row(&mut self, ui: &mut egui::Ui, id: &str, name: &str, volume: f32, muted: bool, peak: Option<f32>, enabled: bool) {
         ui.add(egui::Label::new(name).truncate());
-        ui.horizontal(|ui| {
+        ui.add_enabled_ui(enabled, |ui| ui.horizontal(|ui| {
             let icon = if muted { "🔇" } else { "🔊" };
             if ui.add(egui::Button::new(icon).selected(muted)).clicked() {
                 if id == MASTER_ID {
@@ -839,7 +853,7 @@ impl App {
                     self.mixer.set_volume(id, v / 100.0);
                 }
             }
-        });
+        }));
         if let Some(p) = peak {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
@@ -1042,6 +1056,9 @@ fn load_standby(path: &str) -> Result<([usize; 2], Vec<u8>), String> {
 }
 
 fn main() -> eframe::Result {
+    if let Some(code) = selftest::run_from_args() {
+        std::process::exit(code);
+    }
     // Se o programa der erro, a janela no ar volta para a tela 1 antes de fechar.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

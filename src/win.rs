@@ -9,7 +9,7 @@ use windows::Win32::Devices::Display::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Controls::Dialogs::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -63,6 +63,17 @@ impl Rect {
 
     pub fn covers(&self, o: &Rect) -> bool {
         self.left <= o.left && self.top <= o.top && self.right >= o.right && self.bottom >= o.bottom
+    }
+
+    /// Área em comum com `o`, em pixels.
+    pub fn overlap_area(&self, o: &Rect) -> i32 {
+        let w = self.right.min(o.right) - self.left.max(o.left);
+        let h = self.bottom.min(o.bottom) - self.top.max(o.top);
+        if w > 0 && h > 0 {
+            w * h
+        } else {
+            0
+        }
     }
 }
 
@@ -207,6 +218,125 @@ pub fn visible_rect(hwnd: Hwnd) -> Option<Rect> {
         Some(Rect::from_win(r))
     } else {
         window_rect(hwnd)
+    }
+}
+
+/// Como a janela está agora, para conferir se uma troca deu certo.
+#[derive(Clone, Copy, Debug)]
+pub struct WinState {
+    pub rect: Option<Rect>,
+    pub iconic: bool,
+    pub zoomed: bool,
+    pub visible: bool,
+    pub cloaked: bool,
+    pub style: isize,
+    pub exstyle: isize,
+}
+
+pub fn state(hwnd: Hwnd) -> WinState {
+    let h = hwnd.h();
+    unsafe {
+        WinState {
+            rect: visible_rect(hwnd),
+            iconic: IsIconic(h).as_bool(),
+            zoomed: IsZoomed(h).as_bool(),
+            visible: IsWindowVisible(h).as_bool(),
+            cloaked: is_cloaked(h),
+            style: GetWindowLongPtrW(h, GWL_STYLE),
+            exstyle: GetWindowLongPtrW(h, GWL_EXSTYLE),
+        }
+    }
+}
+
+impl WinState {
+    /// O público vê a janela: visível, não minimizada e não escondida pelo DWM.
+    pub fn shown(&self) -> bool {
+        self.visible && !self.iconic && !self.cloaked
+    }
+}
+
+/// `r` cobre `mon`, aceitando `tol` pixels de folga em cada borda.
+pub fn covers_within(r: &Rect, mon: &Rect, tol: i32) -> bool {
+    r.left <= mon.left + tol && r.top <= mon.top + tol && r.right >= mon.right - tol && r.bottom >= mon.bottom - tol
+}
+
+/// Funções do user32 que o crate `windows` só traz com a feature HiDpi.
+fn user32(name: windows::core::PCSTR) -> Option<unsafe extern "system" fn() -> isize> {
+    unsafe { GetProcAddress(GetModuleHandleW(w!("user32.dll")).ok()?, name) }
+}
+
+/// O mesmo modo de DPI do painel (o eframe liga o "por monitor v2"): tudo em pixels físicos.
+pub fn dpi_aware() {
+    if let Some(f) = user32(windows::core::s!("SetProcessDpiAwarenessContext")) {
+        let f: unsafe extern "system" fn(isize) -> BOOL = unsafe { std::mem::transmute(f) };
+        unsafe {
+            let _ = f(-4);
+        }
+    }
+}
+
+/// Descreve a janela sem mexer nela (autoteste `--inspect`).
+pub fn describe(hwnd: Hwnd) -> String {
+    let h = hwnd.h();
+    unsafe {
+        let s = state(hwnd);
+        let st = s.style as u32;
+        let flag = |bit: WINDOW_STYLE| if st & bit.0 != 0 { 1 } else { 0 };
+        let mut wi = WINDOWINFO { cbSize: size_of::<WINDOWINFO>() as u32, ..Default::default() };
+        let _ = GetWindowInfo(h, &mut wi);
+        let mut pl = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        let _ = GetWindowPlacement(h, &mut pl);
+        let pid = window_pid(h);
+        let dpi_ctx = user32(windows::core::s!("GetWindowDpiAwarenessContext")).map(|f| {
+            let f: unsafe extern "system" fn(HWND) -> isize = std::mem::transmute(f);
+            f(h)
+        });
+        let awareness = match (dpi_ctx, user32(windows::core::s!("GetAwarenessFromDpiAwarenessContext"))) {
+            (Some(c), Some(f)) => {
+                let f: unsafe extern "system" fn(isize) -> i32 = std::mem::transmute(f);
+                match f(c) {
+                    0 => "unaware",
+                    1 => "system",
+                    2 => "per-monitor",
+                    _ => "?",
+                }
+            }
+            _ => "?",
+        };
+        let dpi = user32(windows::core::s!("GetDpiForWindow")).map_or(0, |f| {
+            let f: unsafe extern "system" fn(HWND) -> u32 = std::mem::transmute(f);
+            f(h)
+        });
+        // Quem não é administrador consegue a consulta limitada, mas não a completa, de um processo elevado.
+        let elevated = OpenProcess(PROCESS_QUERY_INFORMATION, false, pid).map(|p| CloseHandle(p)).is_err()
+            && OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map(|p| CloseHandle(p)).is_ok();
+        let r = |r: RECT| format!("{},{},{},{}", r.left, r.top, r.right, r.bottom);
+        format!(
+            "classe={} pid={} exe={} provavel_admin={} dpi={} dpi_modo={} visivel={} minimizada={} maximizada={} cloaked={} \
+             caption={} thickframe={} maxbox={} popup={} topmost={} showCmd={} normal={} janela={} cliente={} visivel_dwm={:?} bordas={}x{}",
+            class_name(h),
+            pid,
+            process_path(pid).rsplit('\\').next().unwrap_or_default(),
+            elevated,
+            dpi,
+            awareness,
+            s.visible,
+            s.iconic,
+            s.zoomed,
+            s.cloaked,
+            flag(WS_CAPTION),
+            flag(WS_THICKFRAME),
+            flag(WS_MAXIMIZEBOX),
+            flag(WS_POPUP),
+            s.exstyle as u32 & WS_EX_TOPMOST.0 != 0,
+            pl.showCmd,
+            r(pl.rcNormalPosition),
+            r(wi.rcWindow),
+            r(wi.rcClient),
+            s.rect.map(|r| (r.left, r.top, r.right, r.bottom)),
+            wi.cxWindowBorders,
+            wi.cyWindowBorders,
+        )
     }
 }
 
@@ -529,23 +659,37 @@ pub struct Saved {
     exstyle: isize,
 }
 
+const CLOSED: &str = "Não consegui mover essa janela. Ela ainda está aberta?";
+const ELEVATED: &str =
+    "Esta janela é de um programa em modo administrador: execute o TakeScreen como administrador para exibi-la.";
+const LOST: &str = "Essa janela não apareceu no datashow e voltou para a tela 1.";
+/// Bits de estado que não podem voltar junto com a moldura salva: a janela passaria a se
+/// achar maximizada ou minimizada sem estar, e o Windows ignoraria o pedido seguinte.
+const STATE_BITS: isize = (WS_MAXIMIZE.0 | WS_MINIMIZE.0) as isize;
+
 /// Leva `target` para o monitor `mon`. A janela é montada por baixo de `cover`
 /// (o que está no ar agora) e só no fim vem para a frente, de uma vez,
 /// então o público não vê ela sendo arrastada ou redimensionada.
-pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Option<Saved> {
+/// Confere o resultado: se o ajuste pedido não cobrir o datashow, tenta de novo e depois maximiza.
+pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Result<Saved, String> {
     let h = target.h();
     unsafe {
-        if !IsWindow(Some(h)).as_bool() {
-            return None;
-        }
         let mut pl = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-        GetWindowPlacement(h, &mut pl).ok()?;
+        if !IsWindow(Some(h)).as_bool() || GetWindowPlacement(h, &mut pl).is_err() {
+            return Err(CLOSED.into());
+        }
         let saved = Saved {
             hwnd: target,
             placement: pl,
             style: GetWindowLongPtrW(h, GWL_STYLE),
             exstyle: GetWindowLongPtrW(h, GWL_EXSTYLE),
         };
+
+        // 0. Programa em modo administrador: o Windows recusa em silêncio qualquer ajuste vindo
+        //    de um programa comum. Um SetWindowPos que não muda nada denuncia isso antes de mexer.
+        if let Err(e) = SetWindowPos(h, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) {
+            return Err(if e.code() == E_ACCESSDENIED { ELEVATED } else { CLOSED }.into());
+        }
 
         // 1. Sai de minimizado/maximizado sem roubar o foco do operador.
         if IsIconic(h).as_bool() || IsZoomed(h).as_bool() {
@@ -555,37 +699,107 @@ pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Op
             let _ = SetWindowPlacement(h, &normal);
         }
 
-        // 2. Monta a janela no datashow, por baixo do que está no ar.
+        // 2. Primeiro só leva para o datashow, no tamanho atual: se o DPI de lá for outro, o
+        //    programa se reajusta agora (WM_DPICHANGED) e não desfaz o tamanho final depois.
         let flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
-        match fit {
-            Fit::Borderless => {
-                let caption = (WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0 as isize;
-                let edges = (WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE).0 as isize;
-                SetWindowLongPtrW(h, GWL_STYLE, saved.style & !caption);
+        let _ = SetWindowPos(h, Some(cover.h()), mon.left + 40, mon.top + 40, 0, 0, flags | SWP_NOSIZE);
+
+        // 3. Ajusta, confere o que aparece de fato e cai para o próximo jeito se não cobrir.
+        let monitors = list_monitors();
+        let work = monitors.iter().find(|m| m.rect == mon).map_or(mon, |m| m.work);
+        let mut done = false;
+        if fit == Fit::Borderless {
+            let caption = (WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0 as isize;
+            let edges = (WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE).0 as isize;
+            // Duas vezes: Chromium e Electron às vezes desfazem o primeiro ajuste.
+            for _ in 0..2 {
+                SetWindowLongPtrW(h, GWL_STYLE, saved.style & !caption & !STATE_BITS);
                 SetWindowLongPtrW(h, GWL_EXSTYLE, saved.exstyle & !edges);
                 let _ = SetWindowPos(h, Some(cover.h()), mon.left, mon.top, mon.width(), mon.height(), flags | SWP_FRAMECHANGED);
-            }
-            Fit::Maximize => {
-                // O Windows não tem "maximizar sem ativar": o SW_MAXIMIZE sempre traz a janela
-                // para a frente. Durante a troca, a cobertura fica "sempre visível" por cima
-                // dela, e o público continua vendo só o que estava no ar.
-                let was_topmost = GetWindowLongPtrW(cover.h(), GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
-                let still = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-                let _ = SetWindowPos(cover.h(), Some(HWND_TOPMOST), 0, 0, 0, 0, still);
-                let _ = SetWindowPos(h, Some(cover.h()), mon.left + 40, mon.top + 40, mon.width() - 80, mon.height() - 80, flags);
-                let _ = ShowWindow(h, SW_MAXIMIZE);
-                if !was_topmost {
-                    // Sai do "sempre visível" e fica logo acima das janelas comuns, ainda por cima da nova.
-                    let _ = SetWindowPos(cover.h(), Some(HWND_NOTOPMOST), 0, 0, 0, 0, still);
+                if settled(target, &mon) {
+                    done = true;
+                    break;
                 }
+            }
+            if !done {
+                // Vai maximizar: com a moldura de volta, para não ficar sem barra de título.
+                SetWindowLongPtrW(h, GWL_STYLE, saved.style & !STATE_BITS);
+                SetWindowLongPtrW(h, GWL_EXSTYLE, saved.exstyle);
+            }
+        }
+        if !done {
+            // O Windows não tem "maximizar sem ativar": o SW_MAXIMIZE sempre traz a janela
+            // para a frente. Durante a troca, a cobertura fica "sempre visível" por cima
+            // dela, e o público continua vendo só o que estava no ar.
+            let was_topmost = GetWindowLongPtrW(cover.h(), GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
+            let still = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+            let _ = SetWindowPos(cover.h(), Some(HWND_TOPMOST), 0, 0, 0, 0, still);
+            let _ = SetWindowPos(h, Some(cover.h()), mon.left + 40, mon.top + 40, mon.width() - 80, mon.height() - 80, flags | SWP_FRAMECHANGED);
+            let _ = ShowWindow(h, SW_MAXIMIZE);
+            // Maximizada ocupa a área útil: se o datashow tiver barra de tarefas, ela continua à vista.
+            done = settled(target, &work);
+            if !was_topmost {
+                // Sai do "sempre visível" e fica logo acima das janelas comuns, ainda por cima da nova.
+                let _ = SetWindowPos(cover.h(), Some(HWND_NOTOPMOST), 0, 0, 0, 0, still);
             }
         }
 
-        // 3. A troca: traz para a frente e deixa a cortina logo atrás, para o caso de a janela fechar.
+        let now = state(target);
+        let others: Vec<Rect> = monitors.iter().filter(|m| m.rect != mon).map(|m| m.rect).collect();
+        match now.rect {
+            // Tamanho mínimo maior que o datashow: a sobra vai para o lado onde não há outra tela.
+            Some(r) if done && (r.width() > mon.width() || r.height() > mon.height()) => {
+                let (x, y) = spill_origin((r.width(), r.height()), &mon, &others);
+                let wr = window_rect(target).unwrap_or(r);
+                let _ = SetWindowPos(h, None, x - (r.left - wr.left), y - (r.top - wr.top), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            // Não cobre (tamanho fixo), mas está à vista no datashow: fica no ar, com a cortina preta em volta.
+            Some(r) if now.shown() && r.overlap_area(&mon) > 0 => {}
+            _ if !done => {
+                restore(&saved);
+                return Err(LOST.into());
+            }
+            _ => {}
+        }
+
+        // 4. A troca: traz para a frente e deixa a cortina logo atrás, para o caso de a janela fechar.
         let _ = SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         let _ = SetWindowPos(curtain.h(), Some(h), mon.left, mon.top, mon.width(), mon.height(), SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        Some(saved)
+        Ok(saved)
     }
+}
+
+/// Dá um tempo para o programa terminar de se ajustar e confere se a janela cobre `want`.
+fn settled(target: Hwnd, want: &Rect) -> bool {
+    for _ in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Atende as mensagens enviadas ao painel (ativação, foco): o outro programa espera por elas.
+        unsafe {
+            let mut msg = MSG::default();
+            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+        }
+    }
+    let s = state(target);
+    s.shown() && s.rect.is_some_and(|r| covers_within(&r, want, 2))
+}
+
+/// Onde pôr uma janela de tamanho `size` maior que `mon`, cobrindo ele e invadindo o mínimo as `others`.
+pub fn spill_origin(size: (i32, i32), mon: &Rect, others: &[Rect]) -> (i32, i32) {
+    let xs = [mon.left, mon.right - size.0, mon.left - (size.0 - mon.width()) / 2];
+    let ys = [mon.top, mon.bottom - size.1, mon.top - (size.1 - mon.height()) / 2];
+    let spill = |&(x, y): &(i32, i32)| {
+        let r = Rect { left: x, top: y, right: x + size.0, bottom: y + size.1 };
+        others.iter().map(|o| r.overlap_area(o) as i64).sum::<i64>()
+    };
+    let mut best = (xs[0], ys[0]);
+    for x in xs {
+        for y in ys {
+            if spill(&(x, y)) < spill(&best) {
+                best = (x, y);
+            }
+        }
+    }
+    best
 }
 
 /// Devolve a janela ao lugar, tamanho e moldura que tinha antes de ir para o datashow.
@@ -595,10 +809,16 @@ pub fn restore(s: &Saved) {
         if !IsWindow(Some(h)).as_bool() {
             return;
         }
-        SetWindowLongPtrW(h, GWL_STYLE, s.style);
-        SetWindowLongPtrW(h, GWL_EXSTYLE, s.exstyle);
         let mut pl = s.placement;
         pl.flags = WINDOWPLACEMENT_FLAGS(0);
+        // Maximizada no datashow: primeiro sai do maximizado, senão o Windows a mantém lá.
+        if IsZoomed(h).as_bool() {
+            let mut normal = pl;
+            normal.showCmd = SW_SHOWNOACTIVATE.0 as u32;
+            let _ = SetWindowPlacement(h, &normal);
+        }
+        SetWindowLongPtrW(h, GWL_STYLE, s.style & !STATE_BITS);
+        SetWindowLongPtrW(h, GWL_EXSTYLE, s.exstyle);
         pl.showCmd = match SHOW_WINDOW_CMD(pl.showCmd as i32) {
             SW_SHOWMINIMIZED => SW_SHOWMINNOACTIVE.0 as u32,
             SW_SHOWMAXIMIZED => SW_SHOWMAXIMIZED.0 as u32,
@@ -606,6 +826,14 @@ pub fn restore(s: &Saved) {
         };
         let _ = SetWindowPlacement(h, &pl);
         let _ = SetWindowPos(h, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        // Nunca some: se não ficou à vista em nenhuma tela, vai para o meio da principal.
+        let st = state(s.hwnd);
+        let monitors = list_monitors();
+        if !st.iconic && !st.rect.is_some_and(|r| monitors.iter().any(|m| r.center_in(&m.rect))) {
+            if let Some(m) = monitors.iter().find(|m| m.primary) {
+                send_home(s.hwnd, m.work);
+            }
+        }
     }
 }
 
@@ -1040,12 +1268,15 @@ pub fn send_home(hwnd: Hwnd, home: Rect) {
                 let _ = SetWindowPlacement(h, &pl);
             }
         }
-        let Some(r) = visible_rect(hwnd) else { return };
+        let (Some(r), Some(wr)) = (visible_rect(hwnd), window_rect(hwnd)) else { return };
         let w = r.width().min(home.width() * 9 / 10).max(200);
         let ht = r.height().min(home.height() * 9 / 10).max(150);
-        let x = home.left + (home.width() - w) / 2;
-        let y = home.top + (home.height() - ht) / 2;
-        let _ = SetWindowPos(h, None, x, y, w, ht, SWP_NOZORDER | SWP_NOACTIVATE);
+        // O SetWindowPos conta a borda invisível (uns 8 px): sem ela, a janela encolheria a cada volta.
+        let (bl, bt) = (r.left - wr.left, r.top - wr.top);
+        let (bw, bh) = (wr.width() - r.width(), wr.height() - r.height());
+        let x = home.left + (home.width() - w) / 2 - bl;
+        let y = home.top + (home.height() - ht) / 2 - bt;
+        let _ = SetWindowPos(h, None, x, y, w + bw, ht + bh, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
@@ -1077,6 +1308,34 @@ mod tests {
         assert!(rect(-1600, 0, 0, 900).covers(&datashow));
         assert!(rect(-1700, -20, 20, 920).covers(&datashow));
         assert!(!rect(-1500, 0, 0, 900).covers(&datashow));
+    }
+
+    #[test]
+    fn covers_within_accepts_small_gaps_only() {
+        let datashow = rect(-1600, 0, 0, 900);
+        assert!(covers_within(&rect(-1598, 2, -2, 898), &datashow, 2));
+        assert!(!covers_within(&rect(-1597, 0, 0, 900), &datashow, 2));
+        assert!(!covers_within(&rect(-1600, 0, 0, 860), &datashow, 2));
+        assert!(covers_within(&rect(-1700, -50, 100, 950), &datashow, 2));
+    }
+
+    #[test]
+    fn overlap_area_counts_shared_pixels() {
+        assert_eq!(rect(0, 0, 10, 10).overlap_area(&rect(5, 5, 20, 20)), 25);
+        assert_eq!(rect(-1600, 0, 0, 900).overlap_area(&rect(0, 0, 1920, 1080)), 0);
+    }
+
+    #[test]
+    fn spill_origin_pushes_overflow_away_from_other_screens() {
+        // Datashow à esquerda da tela principal: a sobra vai para a esquerda, onde não há tela.
+        let datashow = rect(-1600, 0, 0, 900);
+        let primary = rect(0, 0, 1920, 1080);
+        assert_eq!(spill_origin((1700, 1000), &datashow, &[primary]), (-1700, 0));
+        // Datashow à direita: a sobra vai para a direita.
+        let right = rect(1920, 0, 3520, 900);
+        assert_eq!(spill_origin((1700, 1000), &right, &[primary]), (1920, 0));
+        // Sem vizinhos, cobre a partir do canto.
+        assert_eq!(spill_origin((1700, 1000), &datashow, &[]), (-1600, 0));
     }
 
     #[test]
