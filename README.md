@@ -358,8 +358,8 @@ Cada envio para a branch `main` gera o `TakeScreen-windows-x64.zip` na aba **Act
 Every push to `main` builds `TakeScreen-windows-x64.zip` in the **Actions** tab (under *Artifacts*); a tag starting with `v` publishes the zip to **Releases**.
 
 ```
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.4.1
+git push origin v0.4.1
 ```
 
 </details>
