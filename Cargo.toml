@@ -1,6 +1,6 @@
 [package]
 name = "takescreen"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 description = "Control panel for live presentations: preview, go live, media, queue and volume on an external screen"
 
@@ -18,6 +18,7 @@ windows = { version = "0.62", features = [
     "Win32_Devices_Display",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
@@ -33,6 +34,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Registry",
     "Win32_System_Variant",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
 ] }
 
 [profile.release]

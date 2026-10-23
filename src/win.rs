@@ -673,18 +673,31 @@ const STATE_BITS: isize = (WS_MAXIMIZE.0 | WS_MINIMIZE.0) as isize;
 /// Verifies the result: if the requested fit does not cover the projector, retries and then maximizes.
 pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Result<Saved, String> {
     let h = target.h();
-    unsafe {
-        let mut pl = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-        if !IsWindow(Some(h)).as_bool() || GetWindowPlacement(h, &mut pl).is_err() {
-            return Err(CLOSED.into());
-        }
-        let saved = Saved {
-            hwnd: target,
-            placement: pl,
-            style: GetWindowLongPtrW(h, GWL_STYLE),
-            exstyle: GetWindowLongPtrW(h, GWL_EXSTYLE),
-        };
+    let pl = placement(target).ok_or(CLOSED)?;
+    let saved = unsafe { Saved { hwnd: target, placement: pl, style: GetWindowLongPtrW(h, GWL_STYLE), exstyle: GetWindowLongPtrW(h, GWL_EXSTYLE) } };
+    place(&saved, pl, cover, curtain, mon, fit)?;
+    Ok(saved)
+}
 
+/// Switches the live window between the two fits in place. `saved` stays as it was before the
+/// first take, so `restore` still returns the window to its original state.
+pub fn refit(saved: &Saved, curtain: Hwnd, mon: Rect, fit: Fit) -> Result<(), String> {
+    // The current placement: when maximized on the projector, its normal rectangle is there too.
+    let pl = placement(saved.hwnd).ok_or(CLOSED)?;
+    place(saved, pl, curtain, curtain, mon, fit)
+}
+
+fn placement(hwnd: Hwnd) -> Option<WINDOWPLACEMENT> {
+    let mut pl = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+    unsafe { (IsWindow(Some(hwnd.h())).as_bool() && GetWindowPlacement(hwnd.h(), &mut pl).is_ok()).then_some(pl) }
+}
+
+/// Fits `saved.hwnd` to `mon` beneath `cover`, then brings it to the front. `pl` is used to leave
+/// the minimized/maximized state. On failure the window goes back to its original state.
+fn place(saved: &Saved, pl: WINDOWPLACEMENT, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Result<(), String> {
+    let target = saved.hwnd;
+    let h = target.h();
+    unsafe {
         // 0. Program running as administrator: Windows silently rejects any adjustment coming
         //    from an ordinary program. A SetWindowPos that changes nothing reveals this before anything moves.
         if let Err(e) = SetWindowPos(h, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) {
@@ -756,7 +769,7 @@ pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Re
             // Does not cover (fixed size), but is visible on the projector: it stays live, with the black curtain around it.
             Some(r) if now.shown() && r.overlap_area(&mon) > 0 => {}
             _ if !done => {
-                restore(&saved);
+                restore(saved);
                 return Err(LOST.into());
             }
             _ => {}
@@ -765,7 +778,51 @@ pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Re
         // 4. The switch: brings it to the front and keeps the curtain right behind, in case the window closes.
         let _ = SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         let _ = SetWindowPos(curtain.h(), Some(h), mon.left, mon.top, mon.width(), mon.height(), SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        Ok(saved)
+        Ok(())
+    }
+}
+
+/// Programs whose borderless fit looks broken but whose own full screen is clean: the fit becomes
+/// Maximize and the key is pressed once the window is on air.
+/// Explorer draws its title strip itself (a white block remains without the frame) and closes the
+/// window if F11 arrives while it is borderless; VLC keeps its menu and control bars.
+pub fn native_fullscreen(class: &str, exe: &str) -> Option<VIRTUAL_KEY> {
+    match (class, exe.to_lowercase().as_str()) {
+        ("CabinetWClass", _) => Some(VK_FULLSCREEN),
+        // shortcut: VLC is matched by exe name because its Qt window class is shared by every Qt program.
+        (_, "vlc.exe") => Some(VK_VIDEO_FULLSCREEN),
+        _ => None,
+    }
+}
+
+/// The fit to apply and the key to press afterwards, for the fit the operator chose.
+pub fn effective_fit(chosen: Fit, class: &str, exe: &str) -> (Fit, Option<VIRTUAL_KEY>) {
+    match (chosen, native_fullscreen(class, exe)) {
+        (Fit::Borderless, Some(key)) => (Fit::Maximize, Some(key)),
+        (fit, _) => (fit, None),
+    }
+}
+
+pub fn window_class(hwnd: Hwnd) -> String {
+    class_name(hwnd.h())
+}
+
+/// Only one panel may run: two projector guards would keep sending each other's windows back.
+/// Returns false if another TakeScreen is already open.
+pub fn single_instance() -> bool {
+    unsafe {
+        match CreateMutexW(None, true, w!(r"Local\TakeScreen-panel")) {
+            // The handle is kept open for the lifetime of the process on purpose.
+            Ok(_) => GetLastError() != ERROR_ALREADY_EXISTS,
+            Err(_) => true,
+        }
+    }
+}
+
+pub fn alert(text: &str) {
+    let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        MessageBoxW(None, windows::core::PCWSTR(text.as_ptr()), w!("TakeScreen"), MB_OK | MB_ICONINFORMATION);
     }
 }
 
@@ -826,6 +883,10 @@ pub fn restore(s: &Saved) {
         };
         let _ = SetWindowPlacement(h, &pl);
         let _ = SetWindowPos(h, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        // A program's own full screen (Explorer F11) may leave "always on top", which only SetWindowPos clears.
+        if s.exstyle as u32 & WS_EX_TOPMOST.0 == 0 && GetWindowLongPtrW(h, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0 {
+            let _ = SetWindowPos(h, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
         // Never disappears: if it ended up visible on no screen, it moves to the center of the primary one.
         let st = state(s.hwnd);
         let monitors = list_monitors();
@@ -1356,6 +1417,16 @@ mod tests {
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
         Rect { left, top, right, bottom }
+    }
+
+    #[test]
+    fn explorer_e_vlc_usam_a_tela_cheia_do_proprio_programa() {
+        assert_eq!(effective_fit(Fit::Borderless, "CabinetWClass", "explorer.exe"), (Fit::Maximize, Some(VK_FULLSCREEN)));
+        assert_eq!(effective_fit(Fit::Borderless, "Qt5QWindowIcon", "VLC.EXE"), (Fit::Maximize, Some(VK_VIDEO_FULLSCREEN)));
+        // Maximize keeps the native maximize; the video full screen button stays available.
+        assert_eq!(effective_fit(Fit::Maximize, "Qt5QWindowIcon", "vlc.exe"), (Fit::Maximize, None));
+        assert_eq!(effective_fit(Fit::Borderless, "Chrome_WidgetWin_1", "msedge.exe"), (Fit::Borderless, None));
+        assert_eq!(effective_fit(Fit::Borderless, "Qt5QWindowIcon", "obs64.exe"), (Fit::Borderless, None));
     }
 
     #[test]

@@ -9,6 +9,7 @@
 #[cfg(not(windows))]
 compile_error!("O TakeScreen só funciona no Windows. Compile com --target x86_64-pc-windows-gnu ou no próprio Windows.");
 
+mod clip;
 mod queue;
 mod win;
 mod media;
@@ -29,6 +30,8 @@ const PREVIEW_COLOR: egui::Color32 = egui::Color32::from_rgb(46, 160, 67);
 const AIR_COLOR: egui::Color32 = egui::Color32::from_rgb(218, 54, 51);
 const CARD_W: f32 = 220.0;
 const CARD_HEADER: f32 = 30.0;
+const QUEUE_CARD_H: f32 = 44.0;
+const NEXT_COLOR: egui::Color32 = egui::Color32::from_rgb(214, 150, 24);
 const NO_DATASHOW: &str = "O datashow não está conectado (ou é a mesma tela do painel). Nada foi coberto.";
 
 /// What is saved between sessions.
@@ -50,6 +53,12 @@ struct Config {
     queue_take: bool,
     #[serde(default)]
     side_closed: bool,
+    /// The mixer's "Sem áudio" section is expanded (closed by default).
+    #[serde(default)]
+    quiet_open: bool,
+    /// The operator prefers Maximize over the borderless full screen fit.
+    #[serde(default)]
+    fit_maximize: bool,
 }
 
 /// Master volume ID in mixer controls (audio sessions have Windows IDs).
@@ -93,6 +102,12 @@ struct App {
     /// Mixer slider the operator is dragging: the value read from Windows doesn't overwrite it.
     vol_edit: Option<(String, f32, Instant)>,
     url_input: String,
+    /// Ctrl+V was down on the previous frame (see `clip::paste_pressed`).
+    paste_was_down: bool,
+    /// Queue card selected with a click; Del removes it.
+    queue_sel: Option<usize>,
+    /// Text typed in the search box above the window cards.
+    filter: String,
     /// Full screen keys pressed an odd number of times on the ON AIR window.
     toggled: Vec<win::VIRTUAL_KEY>,
 }
@@ -103,6 +118,7 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         win::guard_install(move || ctx.request_repaint());
         let cfg: Config = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
+        let fit = if cfg.fit_maximize { Fit::Maximize } else { Fit::Borderless };
         let mut app = App {
             cfg,
             me: None,
@@ -114,7 +130,7 @@ impl App {
             icons: HashMap::new(),
             last_refresh: Instant::now() - REFRESH,
             preview: None,
-            fit: Fit::Borderless,
+            fit,
             on_air: None,
             thumbs: HashMap::new(),
             placed: Vec::new(),
@@ -131,6 +147,9 @@ impl App {
             }),
             vol_edit: None,
             url_input: String::new(),
+            paste_was_down: false,
+            queue_sel: None,
+            filter: String::new(),
             toggled: Vec::new(),
         };
         if let Some(title) = win::recover_previous() {
@@ -308,7 +327,7 @@ impl App {
     fn select(&mut self, hwnd: Hwnd) {
         self.preview = Some(hwnd);
         let uwp = self.windows.iter().any(|w| w.hwnd == hwnd && w.uwp);
-        self.fit = if uwp { Fit::Maximize } else { Fit::Borderless };
+        self.fit = if uwp || self.cfg.fit_maximize { Fit::Maximize } else { Fit::Borderless };
     }
 
     fn title_of(&self, hwnd: Hwnd) -> String {
@@ -330,7 +349,8 @@ impl App {
         self.leave_fullscreen();
         self.sync_guard(Some(target));
         let cover = self.on_air_hwnd().unwrap_or(curtain);
-        let saved = match win::take(target, cover, curtain, ds.rect, self.fit) {
+        let (fit, key) = self.effective_fit(target, self.fit);
+        let saved = match win::take(target, cover, curtain, ds.rect, fit) {
             Ok(s) => s,
             Err(e) => {
                 self.status = e;
@@ -345,6 +365,44 @@ impl App {
         }
         self.sync_guard(None);
         self.status = format!("No ar: {}", self.title_of(target));
+        if let Some(k) = key {
+            self.press_on_air(k, None);
+        }
+        if let Some(me) = self.me {
+            win::focus(me);
+        }
+    }
+
+    fn effective_fit(&self, hwnd: Hwnd, chosen: Fit) -> (Fit, Option<win::VIRTUAL_KEY>) {
+        let exe = self.windows.iter().find(|w| w.hwnd == hwnd).map(|w| w.exe.as_str()).unwrap_or_default();
+        win::effective_fit(chosen, &win::window_class(hwnd), exe)
+    }
+
+    /// The operator changed the fit: it is saved and, if a window is on air, applied to it now.
+    fn change_fit(&mut self, fit: Fit) {
+        if !self.preview.is_some_and(|p| self.windows.iter().any(|w| w.hwnd == p && w.uwp)) {
+            self.cfg.fit_maximize = fit == Fit::Maximize;
+        }
+        let (Some(saved), Some(curtain), Some(ds)) = (self.on_air, self.curtain, self.datashow_monitor().cloned()) else {
+            return;
+        };
+        self.leave_fullscreen();
+        let (fit, key) = self.effective_fit(saved.hwnd, fit);
+        match win::refit(&saved, curtain, ds.rect, fit) {
+            Ok(()) => {
+                self.status = format!("No ar: {}", self.title_of(saved.hwnd));
+                if let Some(k) = key {
+                    self.press_on_air(k, None);
+                }
+            }
+            Err(e) => {
+                // The window went back to screen 1: the black curtain is on the projector.
+                self.on_air = None;
+                win::remember_on_air(None);
+                self.status = e;
+                self.sync_guard(None);
+            }
+        }
         if let Some(me) = self.me {
             win::focus(me);
         }
@@ -560,8 +618,12 @@ impl App {
                 self.screen_box(ui, Slot::Preview, "PRÉVIA", PREVIEW_COLOR, &preview_caption, width);
                 ui.horizontal(|ui| {
                     ui.label("Ajuste:");
+                    let before = self.fit;
                     ui.radio_value(&mut self.fit, Fit::Borderless, "Tela inteira sem bordas");
                     ui.radio_value(&mut self.fit, Fit::Maximize, "Maximizar");
+                    if self.fit != before {
+                        self.change_fit(self.fit);
+                    }
                 });
             });
             ui.allocate_ui_with_layout(egui::vec2(gap, width * 9.0 / 16.0 + 30.0), egui::Layout::top_down(egui::Align::Center), |ui| {
@@ -597,6 +659,10 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading("Programas abertos");
             ui.label(egui::RichText::new("Clique para ver na prévia. Clique duplo exibe direto.").weak());
+            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Buscar...").desired_width(140.0));
+            if !self.filter.is_empty() && ui.small_button("✖").on_hover_text("Limpar a busca").clicked() {
+                self.filter.clear();
+            }
         });
         ui.add_space(4.0);
 
@@ -607,7 +673,16 @@ impl App {
             ui.spacing_mut().item_spacing = egui::vec2(spacing, spacing);
             let cols = (((ui.available_width() + spacing) / (CARD_W + spacing)).floor() as usize).max(1);
             let clip = to_px(ui.clip_rect(), ui.ctx());
-            let windows = self.windows.clone();
+            let needle = self.filter.trim().to_lowercase();
+            let windows: Vec<WindowInfo> = self
+                .windows
+                .iter()
+                .filter(|w| needle.is_empty() || w.title.to_lowercase().contains(&needle) || w.exe.to_lowercase().contains(&needle))
+                .cloned()
+                .collect();
+            if windows.is_empty() && !needle.is_empty() {
+                ui.label(egui::RichText::new("Nenhum programa com esse texto.").weak());
+            }
             for row in windows.chunks(cols) {
                 ui.horizontal(|ui| {
                     for w in row {
@@ -705,65 +780,46 @@ impl App {
         });
     }
 
+    /// Adds a tooltip that also hides the Windows thumbnails while it is open.
+    fn tip(&mut self, r: egui::Response, text: &str) -> egui::Response {
+        let r = r.on_hover_text(text);
+        self.tip_open |= r.is_tooltip_open();
+        r
+    }
+
     fn queue_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let ready = !self.cfg.queue.items.is_empty();
             let next = egui::Button::new(egui::RichText::new("Próximo ▶").strong().color(egui::Color32::WHITE))
                 .fill(if ready { PREVIEW_COLOR } else { egui::Color32::from_gray(60) });
-            if ui.add_enabled(ready, next).clicked() {
+            let r = ui.add_enabled(ready, next);
+            if self.tip(r, "Mostra o próximo item da fila (PageDown)").clicked() {
                 self.queue_next();
             }
-            if ui.add_enabled(self.cfg.queue.pos.is_some(), egui::Button::new("Reiniciar")).clicked() {
+            let r = ui.add_enabled(self.cfg.queue.pos.is_some(), egui::Button::new("Reiniciar"));
+            if self.tip(r, "O próximo volta a ser o primeiro item").clicked() {
                 self.cfg.queue.reset();
                 self.status = "Fila reiniciada: o Próximo volta ao primeiro item.".into();
             }
-            ui.label(egui::RichText::new("PageDown").small().weak());
+            let r = ui.add_enabled(ready, egui::Button::new("Limpar"));
+            if self.tip(r, "Remove todos os itens da fila").clicked() {
+                self.cfg.queue.clear();
+                self.queue_sel = None;
+                self.status = "Fila limpa.".into();
+            }
         });
         ui.checkbox(&mut self.cfg.queue_take, "Próximo já exibe (sem parar na PRÉVIA)");
 
         if self.cfg.queue.items.is_empty() {
             ui.label(egui::RichText::new("Fila vazia. Adicione a janela da PRÉVIA, um arquivo ou um link.").weak());
+        } else {
+            ui.label(egui::RichText::new("Arraste para reordenar. Clique e aperte Del para remover.").small().weak());
         }
-        let pos = self.cfg.queue.pos;
-        let last = self.cfg.queue.items.len().saturating_sub(1);
-        let mut action: Option<(usize, i8)> = None;
-        for (i, item) in self.cfg.queue.items.iter().enumerate() {
-            ui.horizontal(|ui| {
-                let icon = match item.kind {
-                    queue::Kind::Window(_) => "🗔",
-                    queue::Kind::File(_) => "📄",
-                    queue::Kind::Url(_) => "🌐",
-                };
-                let mut text = egui::RichText::new(format!("{}. {icon} {}", i + 1, item.label));
-                if pos == Some(i) {
-                    text = text.strong().color(PREVIEW_COLOR);
-                }
-                let buttons = 3.0 * 24.0;
-                ui.allocate_ui_with_layout(
-                    egui::vec2((ui.available_width() - buttons).max(40.0), 20.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| ui.add(egui::Label::new(text).truncate()),
-                );
-                if ui.add_enabled(i > 0, egui::Button::new("⏶").small()).clicked() {
-                    action = Some((i, -1));
-                }
-                if ui.add_enabled(i < last, egui::Button::new("⏷").small()).clicked() {
-                    action = Some((i, 1));
-                }
-                if ui.small_button("✖").clicked() {
-                    action = Some((i, 0));
-                }
-            });
-        }
-        match action {
-            Some((i, -1)) => self.cfg.queue.move_up(i),
-            Some((i, 1)) => self.cfg.queue.move_down(i),
-            Some((i, _)) => self.cfg.queue.remove(i),
-            None => {}
-        }
+        self.queue_cards(ui);
 
-        ui.horizontal(|ui| {
-            if ui.add_enabled(self.preview.is_some(), egui::Button::new("+ Janela da PRÉVIA")).clicked() {
+        ui.horizontal_wrapped(|ui| {
+            let r = ui.add_enabled(self.preview.is_some(), egui::Button::new("+ Janela da PRÉVIA"));
+            if self.tip(r, "Põe na fila a janela que está na PRÉVIA").clicked() {
                 if let Some(p) = self.preview {
                     let title = self.title_of(p);
                     self.queue_add(title.clone(), queue::Kind::Window(title));
@@ -776,9 +832,29 @@ impl App {
                 }
             }
         });
-        ui.horizontal(|ui| {
-            let field = ui.add(egui::TextEdit::singleline(&mut self.url_input).hint_text("https://...").desired_width(ui.available_width() - 70.0));
-            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        self.link_row(ui);
+    }
+
+    /// Link field with paste support. eframe has no clipboard here, so Ctrl+V is read from `clip`.
+    fn link_row(&mut self, ui: &mut egui::Ui) {
+        let id = ui.make_persistent_id("link_field");
+        let pressed = clip::paste_pressed(&mut self.paste_was_down);
+        let window_focused = ui.input(|i| i.viewport().focused.unwrap_or(true));
+        if pressed && window_focused && ui.memory(|m| m.has_focus(id)) {
+            if let Some(text) = clip::read_text() {
+                ui.ctx().input_mut(|i| i.events.push(egui::Event::Paste(clip::clean_link(&text))));
+            }
+        }
+        let field = ui.add(egui::TextEdit::singleline(&mut self.url_input).id(id).hint_text("https://...").desired_width(f32::INFINITY));
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.horizontal_wrapped(|ui| {
+            let r = ui.button("Colar");
+            if self.tip(r, "Cola o link copiado, sem espaços nem quebras de linha").clicked() {
+                match clip::read_text().map(|t| clip::clean_link(&t)).filter(|t| !t.is_empty()) {
+                    Some(text) => self.url_input = text,
+                    None => self.status = "Não há texto copiado para colar.".into(),
+                }
+            }
             if ui.button("+ Link").clicked() || enter {
                 match normalize_url(&self.url_input) {
                     Some(url) => {
@@ -789,6 +865,128 @@ impl App {
                 }
             }
         });
+    }
+
+    fn queue_remove(&mut self, i: usize) {
+        if let Some(item) = self.cfg.queue.items.get(i) {
+            self.status = format!("Removido da fila: {}", item.label);
+        }
+        self.cfg.queue.remove(i);
+        self.queue_sel = None;
+    }
+
+    /// One small card per queue item: icon, short title, type, current/next highlight,
+    /// drag to reorder and up/down/remove buttons.
+    fn queue_cards(&mut self, ui: &mut egui::Ui) {
+        let (pos, upcoming) = (self.cfg.queue.pos, self.cfg.queue.upcoming());
+        let n = self.cfg.queue.items.len();
+        let mut action: Option<(usize, i8)> = None;
+        let mut dropped: Option<(usize, usize)> = None;
+        ui.spacing_mut().item_spacing.y = 4.0;
+        for i in 0..n {
+            let item = self.cfg.queue.items[i].clone();
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), QUEUE_CARD_H), egui::Sense::click_and_drag());
+            if resp.drag_started() {
+                resp.dnd_set_drag_payload(i);
+            }
+            if resp.clicked() {
+                self.queue_sel = Some(i);
+            }
+            if let Some(from) = resp.dnd_release_payload::<usize>() {
+                dropped = Some((*from, i));
+            }
+            let (state, color) = if pos == Some(i) {
+                ("atual", Some(PREVIEW_COLOR))
+            } else if upcoming == Some(i) {
+                ("próximo", Some(NEXT_COLOR))
+            } else {
+                ("", None)
+            };
+            let visuals = ui.visuals();
+            let selected = self.queue_sel == Some(i);
+            let fill = if selected || resp.hovered() { visuals.widgets.hovered.weak_bg_fill } else { visuals.faint_bg_color };
+            let stroke = match color {
+                Some(c) => egui::Stroke::new(2.0, c),
+                None if selected => egui::Stroke::new(1.5, visuals.selection.stroke.color),
+                None => egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+            };
+            let (strong, weak) = (visuals.strong_text_color(), visuals.weak_text_color());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 6.0, fill);
+            painter.rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Inside);
+
+            let icon_rect = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, (QUEUE_CARD_H - 28.0) / 2.0), egui::vec2(28.0, 28.0));
+            let texture = match &item.kind {
+                queue::Kind::Window(_) => queue::find_window(&item, &self.windows).and_then(|w| self.icons.get(&w.hwnd)).and_then(|t| t.as_ref()),
+                _ => None,
+            };
+            match texture {
+                Some(t) => {
+                    painter.image(t.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                }
+                None => {
+                    painter.rect_filled(icon_rect, 5.0, egui::Color32::from_gray(70));
+                    let glyph = match queue::kind_label(&item.kind) {
+                        "janela" => "🗔",
+                        "vídeo" => "🎬",
+                        "link" => "🌐",
+                        _ => "📄",
+                    };
+                    painter.text(icon_rect.center(), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(16.0), egui::Color32::WHITE);
+                }
+            }
+            let text_x = icon_rect.right() + 8.0;
+            let buttons_w = 3.0 * 22.0 + 4.0;
+            let text_w = (rect.right() - buttons_w - text_x - 4.0).max(30.0);
+            let mut job = egui::text::LayoutJob::single_section(
+                item.label.clone(),
+                egui::TextFormat { font_id: egui::FontId::proportional(13.0), color: strong, ..Default::default() },
+            );
+            job.wrap = egui::text::TextWrapping::truncate_at_width(text_w);
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            let painter = ui.painter();
+            painter.galley(egui::pos2(text_x, rect.top() + 5.0), galley, strong);
+            let kind = queue::kind_label(&item.kind);
+            let sub = if state.is_empty() { format!("{}. {kind}", i + 1) } else { format!("{}. {kind} · {}", i + 1, state.to_uppercase()) };
+            painter.text(egui::pos2(text_x, rect.bottom() - 6.0), egui::Align2::LEFT_BOTTOM, sub, egui::FontId::proportional(11.0), color.unwrap_or(weak));
+
+            let button = |k: usize| egui::Rect::from_min_size(egui::pos2(rect.right() - buttons_w + 22.0 * k as f32, rect.center().y - 10.0), egui::vec2(20.0, 20.0));
+            if ui.put(button(0), egui::Button::new("⏶").small().frame(false)).on_hover_text("Subir").clicked() && i > 0 {
+                action = Some((i, -1));
+            }
+            if ui.put(button(1), egui::Button::new("⏷").small().frame(false)).on_hover_text("Descer").clicked() && i + 1 < n {
+                action = Some((i, 1));
+            }
+            if ui.put(button(2), egui::Button::new("✖").small().frame(false)).on_hover_text("Remover da fila").clicked() {
+                action = Some((i, 0));
+            }
+            // Insertion line while another card is dragged over this one.
+            if let Some(from) = resp.dnd_hover_payload::<usize>().filter(|from| **from != i) {
+                let y = if *from > i { rect.top() - 2.0 } else { rect.bottom() + 2.0 };
+                ui.painter().hline(rect.x_range(), y, egui::Stroke::new(3.0, PREVIEW_COLOR));
+            }
+            if resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            } else if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+        }
+        if let Some((from, to)) = dropped {
+            self.cfg.queue.move_to(from, to);
+            self.queue_sel = Some(to);
+        }
+        match action {
+            Some((i, -1)) => {
+                self.cfg.queue.move_up(i);
+                self.queue_sel = Some(i - 1);
+            }
+            Some((i, 1)) => {
+                self.cfg.queue.move_down(i);
+                self.queue_sel = Some(i + 1);
+            }
+            Some((i, _)) => self.queue_remove(i),
+            None => {}
+        }
     }
 
     fn media_ui(&mut self, ui: &mut egui::Ui) {
@@ -832,30 +1030,70 @@ impl App {
             self.vol_edit = None;
         }
         let (master, master_muted) = self.mixer.master();
-        self.volume_row(ui, MASTER_ID, "Volume geral", master, master_muted, None, true);
+        self.volume_row(ui, MASTER_ID, "Volume geral", master, master_muted, None, true, None);
         ui.separator();
         // One program per exe, with the name of its first card.
         let mut programs: Vec<(String, String)> = Vec::new();
+        // Window icon of each program, reused from the window cards.
+        let mut exe_icons: HashMap<String, egui::TextureHandle> = HashMap::new();
         for w in &self.windows {
             if !programs.iter().any(|(p, _)| p.eq_ignore_ascii_case(&w.exe_path)) {
                 programs.push((w.exe_path.clone(), w.title.clone()));
             }
+            if let Some(Some(t)) = self.icons.get(&w.hwnd) {
+                exe_icons.entry(w.exe_path.to_lowercase()).or_insert_with(|| t.clone());
+            }
         }
         self.mixer.set_known(&programs.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
-        for a in mixer::rows(self.mixer.apps(), &programs) {
-            let name = match a.sound {
-                mixer::Sound::Playing => a.name.clone(),
-                mixer::Sound::Idle => format!("{} (parado)", a.name),
-                mixer::Sound::None => format!("{} (sem áudio no momento)", a.name),
-            };
-            self.volume_row(ui, &a.id, &name, a.volume, a.muted, Some(a.peak), a.sound != mixer::Sound::None);
+        let (playing, quiet) = mixer::split_quiet(mixer::rows(self.mixer.apps(), &programs));
+        if playing.is_empty() {
+            ui.label(egui::RichText::new("Nenhum programa tocando agora.").weak());
+        }
+        for a in &playing {
+            self.app_row(ui, a, &exe_icons);
+        }
+        if !quiet.is_empty() {
+            let title = egui::RichText::new(format!("Sem áudio ({})", quiet.len())).strong();
+            let section = egui::CollapsingHeader::new(title).id_salt("mixer_quiet").open(Some(self.cfg.quiet_open)).show(ui, |ui| {
+                for a in &quiet {
+                    self.app_row(ui, a, &exe_icons);
+                }
+            });
+            if section.header_response.clicked() {
+                self.cfg.quiet_open = !self.cfg.quiet_open;
+            }
         }
         ui.label(egui::RichText::new("Navegadores têm um controle só para todas as abas.").small().weak());
     }
 
+    fn app_row(&mut self, ui: &mut egui::Ui, a: &mixer::AudioApp, exe_icons: &HashMap<String, egui::TextureHandle>) {
+        let name = match a.sound {
+            mixer::Sound::Playing => a.name.clone(),
+            mixer::Sound::Idle => format!("{} (parado)", a.name),
+            mixer::Sound::None => format!("{} (sem áudio no momento)", a.name),
+        };
+        let lead = (exe_icons.get(&a.id), a.name.chars().next().unwrap_or('?'));
+        self.volume_row(ui, &a.id, &name, a.volume, a.muted, Some(a.peak), a.sound != mixer::Sound::None, Some(lead));
+    }
+
     /// Name, mute button, 0-100 slider, and for programs, the level bar.
-    fn volume_row(&mut self, ui: &mut egui::Ui, id: &str, name: &str, volume: f32, muted: bool, peak: Option<f32>, enabled: bool) {
-        ui.add(egui::Label::new(name).truncate());
+    /// `lead` is the program icon (or, without one, the initial letter) shown before the name.
+    fn volume_row(&mut self, ui: &mut egui::Ui, id: &str, name: &str, volume: f32, muted: bool, peak: Option<f32>, enabled: bool, lead: Option<(Option<&egui::TextureHandle>, char)>) {
+        ui.horizontal(|ui| {
+            if let Some((icon, letter)) = lead {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                match icon {
+                    Some(t) => {
+                        ui.painter().image(t.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    }
+                    None => {
+                        ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(80));
+                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, letter.to_uppercase().to_string(), egui::FontId::proportional(11.0), egui::Color32::WHITE);
+                    }
+                }
+            }
+            ui.add(egui::Label::new(name).truncate());
+        });
         ui.add_enabled_ui(enabled, |ui| ui.horizontal(|ui| {
             let icon = if muted { "🔇" } else { "🔊" };
             if ui.add(egui::Button::new(icon).selected(muted)).clicked() {
@@ -898,6 +1136,11 @@ impl App {
             // Typing a link in the queue: keys belong to the text field.
         if egui::Popup::is_any_open(ctx) || ctx.text_edit_focused() {
             return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+            if let Some(i) = self.queue_sel {
+                self.queue_remove(i);
+            }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
             self.queue_next();
@@ -1086,6 +1329,10 @@ fn load_standby(path: &str) -> Result<([usize; 2], Vec<u8>), String> {
 fn main() -> eframe::Result {
     if let Some(code) = selftest::run_from_args() {
         std::process::exit(code);
+    }
+    if !win::single_instance() {
+        win::alert("O TakeScreen já está aberto. Use a janela que já está aberta.");
+        return Ok(());
     }
     // If the program crashes, the ON AIR window returns to screen 1 before closing.
     let default_hook = std::panic::take_hook();

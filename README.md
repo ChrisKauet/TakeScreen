@@ -65,20 +65,24 @@ TakeScreen lets the person running the screen at a church service, class or even
 | | Feature | How it works |
 |:-:|---|---|
 | 🎬 | **PRÉVIA and NO AR** (preview and on air) | Live images of the windows, drawn by Windows itself. Preview is green, on air is red. |
-| 🗂️ | **Open programs** | Cards with the icon and a live preview: click to send to the preview, double-click to show right away. Cards keep the order the programs opened in. |
+| 🗂️ | **Open programs** | Cards with the icon and a live preview: click to send to the preview, double-click to show right away. Cards keep the order the programs opened in. The **Buscar...** (search) box filters the cards by title or program. |
 | ▶️ | **EXIBIR** (show, or Enter) | The preview window is placed on the external screen *behind* the one on air and only then comes to the front. The audience sees only the switch. The window that was on air goes back to screen 1 as it was. |
 | ⬛ | **Limpar datashow** (clear, or Esc) | Covers the external screen with the standby image (or black). With a menu open, Esc only closes the menu. |
 | 🖼️ | **Standby image** | Under *Espera*, **Escolher imagem** (PNG or JPEG) sets what the audience sees when nothing is on air, centered and undistorted. **Usar tela preta** goes back to black. |
+| 🪟 | **Window fit** | *Tela inteira sem bordas* (borderless full screen) or *Maximizar* (maximize). The choice is saved for the next time. Changing it while a window is on air refits that window right away, without taking it off air. Microsoft Store apps always use Maximizar. |
+| 🗃️ | **Explorer and VLC** | In *Tela inteira sem bordas*, File Explorer and VLC are maximized with their own frame and then switched to their own full screen (F11 in Explorer, F in VLC). That full screen is undone when the window leaves the air. |
 | 🔲 | **Program fullscreen** (F11) | Presses F11 in the window on air (Chrome, Photos). |
 | 📺 | **Video fullscreen** (F) | Presses F in the window on air to toggle video fullscreen (YouTube, Vimeo, Twitch and most HTML5 players). |
 | 🛡️ | **Proteger datashow** (protect, on by default) | Any window that opens or is dragged onto screen 2 without going through TakeScreen goes straight back to screen 1. |
 | 📊 | **PowerPoint shows** | When PowerPoint opens the slideshow directly on the external screen, it stays hidden behind the curtain and appears in the preview. Press EXIBIR to show it. |
 | ♻️ | **Crash recovery** | If TakeScreen closes with a window on air, that window goes back to screen 1 as it was, right away or on the next start. |
 | 🔌 | **External screen remembered by name** | The external screen is remembered by its device name, so it stays right if the display order changes. |
-| 📋 | **Queue** | In the side bar (button **☰ Fila, mídia e mixer**), build the running order: the preview window, a file or a link. **Próximo ▶** (next, or PageDown) puts the next window in the preview, or shows it right away if *Próximo já exibe* is checked. Files and links open in their default program. **Reiniciar** (restart) goes back to the start. The queue is saved. |
+| 📋 | **Queue** | In the side bar (button **☰ Fila, mídia e mixer**), build the running order: the preview window, a file or a link. Each item is a card with an icon, its type and the *atual* (current) and *próximo* (next) marks. Drag a card to reorder it; click a card and press Del to remove it. **Próximo ▶** (next, or PageDown) puts the next window in the preview, or shows it right away if *Próximo já exibe* is checked. Files and links open in their default program. **Reiniciar** (restart) goes back to the start and **Limpar** (clear) empties the queue. The queue is saved. |
+| 🔗 | **Paste a link** | The **Colar** (paste) button or Ctrl+V in the link field pastes the copied link. |
 | ⏯️ | **Media** | Lists what is playing (Chrome and Edge tabs, Spotify, Movies & TV, VLC) with previous, play/pause and next, without bringing the player to the front or showing its controls on the external screen. For players not on the list, **Tocar/pausar a janela NO AR** toggles the window on air. |
 | 🎞️ | **VLC without HUD** | **Abrir vídeo no VLC (sem HUD)** opens a file fullscreen with no control bar, title or messages. Needs VLC installed. |
-| 🎚️ | **Mixer** | Master volume plus one control per program (volume, mute and sound level), without opening the Windows mixer. Browsers have a single control for all their tabs. |
+| 🎚️ | **Mixer** | Master volume plus one control per program, with its icon (volume, mute and sound level), without opening the Windows mixer. Programs playing sound come first; the silent ones go to the collapsible **Sem áudio** (no audio) section. Browsers have a single control for all their tabs. |
+| 1️⃣ | **Single instance** | Only one TakeScreen runs at a time. Opening it again shows a notice and keeps the panel that is already open. |
 
 ### ⚡ Shortcuts
 
@@ -88,6 +92,8 @@ TakeScreen lets the person running the screen at a church service, class or even
 | <kbd>Esc</kbd> | Clear the external screen (with a menu open, only closes the menu) |
 | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | Picks the previous or next program for the preview |
 | <kbd>PageDown</kbd> | Next item in the queue |
+| <kbd>Del</kbd> | Removes the selected queue item |
+| <kbd>Ctrl</kbd>+<kbd>V</kbd> | Pastes the copied link in the link field |
 | Double-click a card | Shows it right away |
 
 ### 💡 Tips
@@ -188,7 +194,7 @@ Released under the [MIT](LICENSE) license.
 | | Função | Como funciona |
 |:-:|---|---|
 | 🎬 | **PRÉVIA e NO AR** | PRÉVIA (verde) e NO AR (vermelho) são imagens ao vivo das janelas, desenhadas pelo próprio Windows. |
-| 🗂️ | **Programas abertos** | Embaixo, em cartões com o ícone e uma prévia ao vivo: clique para ver na PRÉVIA, clique duplo para exibir direto. Os cartões ficam na ordem em que os programas abriram e não trocam de lugar quando o foco muda. Com o mouse em cima de um cartão, o título completo e o programa aparecem na barra de status. |
+| 🗂️ | **Programas abertos** | Embaixo, em cartões com o ícone e uma prévia ao vivo: clique para ver na PRÉVIA, clique duplo para exibir direto. Os cartões ficam na ordem em que os programas abriram e não trocam de lugar quando o foco muda. Com o mouse em cima de um cartão, o título completo e o programa aparecem na barra de status. A caixa **Buscar...** filtra os cartões pelo título ou pelo programa. |
 | ▶️ | **EXIBIR** (ou Enter) | A janela da prévia é montada na tela externa *por trás* da que está no ar e só depois vem para a frente. O público vê só a troca. A janela que estava no ar volta para a tela 1 do jeito que estava. |
 | ⬛ | **Limpar datashow** (ou Esc) | Cobre a tela externa com a imagem de espera (ou tela preta). Com um menu aberto, Esc só fecha o menu. |
 | 🖼️ | **Imagem de espera** | Em *Espera*, **Escolher imagem** (PNG ou JPEG) define o que o público vê quando nada está no ar, centralizada e sem distorcer. **Usar tela preta** volta ao preto. A imagem é lembrada na próxima abertura; se o arquivo sumir, a tela externa fica preta e a barra de status avisa. |
@@ -199,10 +205,12 @@ Released under the [MIT](LICENSE) license.
 | 🖥️ | **Um monitor só** | Sem tela externa separada (ou com o painel na mesma tela), EXIBIR e Limpar não cobrem nada e a barra de status avisa. |
 | ♻️ | **Recuperação após travamento** | Se o TakeScreen fechar com uma janela no ar (erro no programa ou processo encerrado), ela volta para a tela 1 do jeito que estava, na hora ou na próxima abertura. |
 | 🔌 | **Tela externa lembrada pelo nome** | A tela externa é lembrada pelo nome do aparelho, então continua certo se a ordem dos monitores mudar. |
-| 📋 | **Fila** | Na barra lateral (botão **☰ Fila, mídia e mixer**), monte a sequência do culto: a janela da PRÉVIA, um arquivo ou um link. **Próximo ▶** (ou PageDown) põe a próxima janela na PRÉVIA, ou já exibe se *Próximo já exibe* estiver marcado; arquivos e links abrem no programa padrão. No fim da fila, **Reiniciar** volta ao começo. A fila fica salva. |
+| 📋 | **Fila** | Na barra lateral (botão **☰ Fila, mídia e mixer**), monte a sequência do culto: a janela da PRÉVIA, um arquivo ou um link. Cada item é um cartão com ícone, tipo e as marcas *atual* e *próximo*. Arraste um cartão para mudar a ordem; clique num cartão e aperte Del para remover. **Próximo ▶** (ou PageDown) põe a próxima janela na PRÉVIA, ou já exibe se *Próximo já exibe* estiver marcado; arquivos e links abrem no programa padrão. **Reiniciar** volta ao começo e **Limpar** esvazia a fila. A fila fica salva. |
+| 🔗 | **Colar link** | O botão **Colar** ou Ctrl+V no campo de link cola o link copiado. |
 | ⏯️ | **Mídia** | Lista o que está tocando (abas do Chrome e Edge, Spotify, Filmes e TV, VLC) com voltar, tocar/pausar e avançar, sem trazer o player para a frente e sem mostrar os controles dele na tela externa. Para players que não aparecem na lista, **Tocar/pausar a janela NO AR**. |
 | 🎞️ | **Vídeo no VLC sem HUD** | **Abrir vídeo no VLC (sem HUD)** abre o arquivo em tela cheia sem barra de controles, título nem avisos. A janela volta para a tela 1 pela proteção; escolha ela e aperte EXIBIR. Precisa do VLC instalado. |
-| 🎚️ | **Mixer** | Volume geral e um controle por programa (volume, mudo e nível do som), sem abrir o mixer do Windows. |
+| 🎚️ | **Mixer** | Volume geral e um controle por programa, com o ícone dele (volume, mudo e nível do som), sem abrir o mixer do Windows. Os programas tocando vêm primeiro; os silenciosos ficam na seção recolhível **Sem áudio**. |
+| 1️⃣ | **Instância única** | Só um TakeScreen roda por vez. Abrir de novo mostra um aviso e mantém o painel que já está aberto. |
 
 ### ⚡ Atalhos
 
@@ -212,13 +220,17 @@ Released under the [MIT](LICENSE) license.
 | <kbd>Esc</kbd> | Limpar datashow (com um menu aberto, só fecha o menu) |
 | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | Escolhe o programa anterior ou o próximo para a PRÉVIA |
 | <kbd>PageDown</kbd> | Próximo item da fila (com um menu aberto ou digitando um link, não faz nada) |
+| <kbd>Del</kbd> | Remove o item selecionado da fila |
+| <kbd>Ctrl</kbd>+<kbd>V</kbd> | Cola o link copiado no campo de link |
 | Clique duplo no cartão | Exibe direto, sem esperar o EXIBIR |
 | Botão **Tela cheia do programa (F11)** | Aperta <kbd>F11</kbd> na janela que está no ar |
 
 ### 🪟 Ajuste da janela
 
 - *Tela inteira sem bordas*: tira a barra de título e ocupa o monitor todo. Padrão para programas comuns (PowerPoint, Chrome).
-- *Maximizar*: padrão para apps da Microsoft Store (Fotos, Filmes e TV), que desenham a própria moldura.
+- *Maximizar*: maximiza no monitor. Apps da Microsoft Store (Fotos, Filmes e TV), que desenham a própria moldura, sempre usam este modo.
+- Explorador de Arquivos e VLC em *Tela inteira sem bordas*: são maximizados com a moldura deles e depois entram na tela cheia do próprio programa (F11 no Explorador, F no VLC). Ao sair do ar, essa tela cheia é desfeita.
+- A escolha fica salva para a próxima abertura. Trocar com uma janela no ar reajusta a janela na hora, sem tirar do ar.
 
 ### 💡 Dicas
 
@@ -346,8 +358,8 @@ Cada envio para a branch `main` gera o `TakeScreen-windows-x64.zip` na aba **Act
 Every push to `main` builds `TakeScreen-windows-x64.zip` in the **Actions** tab (under *Artifacts*); a tag starting with `v` publishes the zip to **Releases**.
 
 ```
-git tag v0.3.2
-git push origin v0.3.2
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 </details>

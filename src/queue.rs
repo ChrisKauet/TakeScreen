@@ -56,6 +56,39 @@ impl Queue {
         }
     }
 
+    /// Moves the item at `from` so it ends up at index `to`, keeping the highlight with the current item.
+    /// Used by drag and drop; out of range indexes do nothing.
+    pub fn move_to(&mut self, from: usize, to: usize) {
+        let n = self.items.len();
+        if from >= n || to >= n || from == to {
+            return;
+        }
+        let item = self.items.remove(from);
+        self.items.insert(to, item);
+        self.pos = self.pos.map(|p| {
+            if p == from {
+                to
+            } else if from < to && p > from && p <= to {
+                p - 1
+            } else if to < from && p >= to && p < from {
+                p + 1
+            } else {
+                p
+            }
+        });
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.pos = None;
+    }
+
+    /// Index the next press of "Next" will show, if any.
+    pub fn upcoming(&self) -> Option<usize> {
+        let n = self.pos.map_or(0, |p| p + 1);
+        (n < self.items.len()).then_some(n)
+    }
+
     /// Swaps two neighbors keeping the highlight with the current item.
     fn swap(&mut self, a: usize, b: usize) {
         self.items.swap(a, b);
@@ -79,6 +112,23 @@ impl Queue {
 
     pub fn reset(&mut self) {
         self.pos = None;
+    }
+}
+
+/// Short type name shown on a queue card.
+pub fn kind_label(kind: &Kind) -> &'static str {
+    const VIDEO: [&str; 8] = ["mp4", "mkv", "avi", "mov", "wmv", "webm", "mpg", "mpeg"];
+    match kind {
+        Kind::Window(_) => "janela",
+        Kind::Url(_) => "link",
+        Kind::File(p) => {
+            let ext = std::path::Path::new(p).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if VIDEO.contains(&ext.as_str()) {
+                "vídeo"
+            } else {
+                "arquivo"
+            }
+        }
     }
 }
 
@@ -149,6 +199,40 @@ mod tests {
         assert_eq!((labels(&q), q.pos), (vec!["a", "c", "b"], Some(1)));
         q.move_down(2); // already last
         assert_eq!(labels(&q), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn move_to_reordena_e_segue_o_atual() {
+        let mut q = fila(4);
+        q.pos = Some(1);
+        q.move_to(0, 2); // a goes after c: b, c, a, d
+        assert_eq!((labels(&q), q.pos), (vec!["b", "c", "a", "d"], Some(0)));
+        q.move_to(3, 0); // d to the front: d, b, c, a
+        assert_eq!((labels(&q), q.pos), (vec!["d", "b", "c", "a"], Some(1)));
+        q.move_to(1, 3); // the current item itself moves
+        assert_eq!((labels(&q), q.pos), (vec!["d", "c", "a", "b"], Some(3)));
+        q.move_to(2, 2);
+        q.move_to(9, 0);
+        assert_eq!(labels(&q), ["d", "c", "a", "b"]);
+    }
+
+    #[test]
+    fn upcoming_e_clear() {
+        let mut q = fila(2);
+        assert_eq!(q.upcoming(), Some(0));
+        q.next();
+        q.next();
+        assert_eq!(q.upcoming(), None);
+        q.clear();
+        assert_eq!((q.items.len(), q.pos), (0, None));
+    }
+
+    #[test]
+    fn tipo_do_cartao() {
+        assert_eq!(kind_label(&Kind::File(r"C:\x\Culto.MP4".into())), "vídeo");
+        assert_eq!(kind_label(&Kind::File(r"C:\x\letra.pptx".into())), "arquivo");
+        assert_eq!(kind_label(&Kind::Url("https://a.com".into())), "link");
+        assert_eq!(kind_label(&Kind::Window("x".into())), "janela");
     }
 
     #[test]

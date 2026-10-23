@@ -103,7 +103,35 @@ fn selftest(seq: &[String], fit: Option<Fit>, press: Option<VIRTUAL_KEY>) -> i32
     let mut fails = 0;
     let mut on_air: Option<(Saved, String, WinState)> = None;
     let mut toggled = Vec::new();
+    let mut air_exe = String::new();
     for part in seq {
+        // A "fit:maximize|borderless" step switches the live window in place, as the panel selector does.
+        if let Some(mode) = part.strip_prefix("fit:") {
+            if let Some((s, title, _)) = on_air.as_ref() {
+                let chosen = if mode == "maximize" { Fit::Maximize } else { Fit::Borderless };
+                let (applied, key) = win::effective_fit(chosen, &win::window_class(s.hwnd), &air_exe);
+                win::undo_keys(s.hwnd, std::mem::take(&mut toggled), panel);
+                println!("FIT {chosen:?} (aplicado {applied:?}, tecla {key:?}) em \"{title}\"");
+                match win::refit(s, curtain, ds.rect, applied) {
+                    Ok(()) => {
+                        press_own_key(s.hwnd, key, panel, &mut toggled);
+                        wait(1500);
+                        fails += check_air(s.hwnd, title, &ds, &mons);
+                    }
+                    Err(e) => {
+                        println!("FALHA refit: {e}");
+                        fails += 1;
+                        on_air = None;
+                    }
+                }
+            }
+            continue;
+        }
+        // A "wait:<ms>" step keeps the live window on air, for example to capture the projector.
+        if let Some(ms) = part.strip_prefix("wait:") {
+            wait(ms.parse().unwrap_or(1000));
+            continue;
+        }
         // A "key:<k>" step presses the key on the live window, as the panel buttons do.
         if let Some(k) = part.strip_prefix("key:") {
             if let Some((s, _, _)) = on_air.as_ref() {
@@ -123,8 +151,9 @@ fn selftest(seq: &[String], fit: Option<Fit>, press: Option<VIRTUAL_KEY>) -> i32
             continue;
         };
         let before = win::state(w.hwnd);
-        let fit = fit.unwrap_or(if w.uwp { Fit::Maximize } else { Fit::Borderless });
-        println!("TAKE \"{}\" fit={fit:?} antes: {}", w.title, fmt(&before));
+        let chosen = fit.unwrap_or(if w.uwp { Fit::Maximize } else { Fit::Borderless });
+        let (fit, key) = win::effective_fit(chosen, &win::window_class(w.hwnd), &w.exe);
+        println!("TAKE \"{}\" fit={chosen:?} (aplicado {fit:?}, tecla {key:?}) antes: {}", w.title, fmt(&before));
         // Same as the panel: undo the full screen keys before the live window leaves the air.
         if let Some((s, _, _)) = on_air.as_ref() {
             win::undo_keys(s.hwnd, std::mem::take(&mut toggled), panel);
@@ -146,6 +175,8 @@ fn selftest(seq: &[String], fit: Option<Fit>, press: Option<VIRTUAL_KEY>) -> i32
                 if let Some((old, title, b)) = on_air.replace((saved, w.title.clone(), before)) {
                     fails += give_back(&old, &title, &b, &ds, &home, &mons);
                 }
+                air_exe = w.exe.clone();
+                press_own_key(w.hwnd, key, panel, &mut toggled);
                 wait(1500);
                 fails += check_air(w.hwnd, &w.title, &ds, &mons);
             }
@@ -213,10 +244,23 @@ fn give_back(old: &Saved, title: &str, before: &WinState, ds: &Monitor, home: &M
         tag(ok),
         fmt(&s)
     );
+    if !same_frame {
+        println!("      estilo agora={:#x}/{:#x} antes={:#x}/{:#x}", s.style, s.exstyle, before.style, before.exstyle);
+    }
     !ok as i32
 }
 
 /// Presses the key twice on the live window: toggles full screen on and off on the test page.
+/// Presses the program's own full screen key, as the panel does right after a take.
+fn press_own_key(h: Hwnd, key: Option<VIRTUAL_KEY>, panel: Hwnd, toggled: &mut Vec<VIRTUAL_KEY>) {
+    let Some(k) = key else { return };
+    let sent = win::press_key_on(h, k, panel);
+    println!("      tecla de tela cheia do programa: {sent:?}");
+    if sent.is_ok() {
+        win::toggle_key(toggled, k);
+    }
+}
+
 fn press_test(h: Hwnd, vk: VIRTUAL_KEY, panel: Hwnd) -> i32 {
     let marked = win::title(h).contains("FS-OFF");
     let mut fails = 0;

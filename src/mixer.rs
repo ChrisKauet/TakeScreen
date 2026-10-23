@@ -170,6 +170,11 @@ pub fn rows(groups: Vec<AudioApp>, programs: &[(String, String)]) -> Vec<AudioAp
     out
 }
 
+/// Splits the sorted list into programs playing now and the quiet ones (idle session or none).
+pub fn split_quiet(rows: Vec<AudioApp>) -> (Vec<AudioApp>, Vec<AudioApp>) {
+    rows.into_iter().partition(|a| a.sound == Sound::Playing)
+}
+
 /// Exe owning the audio of `pid`: itself if it has a window, else the first ancestor with a window
 /// (browsers and Electron play in a child process). If no ancestor has a window, the inverse:
 /// a descendant with a window (in Steam audio is from steam.exe, window is from steamwebhelper).
@@ -426,5 +431,14 @@ mod tests {
         let programs = vec![("A".to_string(), "Janela do A".to_string()), ("c".to_string(), "Janela C".to_string())];
         let seen: Vec<_> = rows(groups, &programs).into_iter().map(|a| (a.name, a.sound)).collect();
         assert_eq!(seen, [("Janela do A".to_string(), Sound::Playing), ("b".to_string(), Sound::Idle), ("Janela C".to_string(), Sound::None)]);
+    }
+
+    #[test]
+    fn separa_os_que_nao_tocam() {
+        let app = |id: &str, sound| AudioApp { id: id.into(), name: id.into(), volume: 1.0, muted: false, peak: 0.0, sound };
+        let sorted = rows(vec![app("c", Sound::Idle), app("a", Sound::Playing), app("b", Sound::Playing)], &[("d".to_string(), "d".to_string())]);
+        let (playing, quiet) = split_quiet(sorted);
+        assert_eq!(playing.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(quiet.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["c", "d"]);
     }
 }
