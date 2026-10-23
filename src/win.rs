@@ -659,6 +659,13 @@ pub struct Saved {
     exstyle: isize,
 }
 
+impl Saved {
+    /// The style `restore` gives back; differs from the original only for a VLC stuck without a frame.
+    pub fn style(&self) -> isize {
+        self.style
+    }
+}
+
 const CLOSED: &str = "Não consegui mover essa janela. Ela ainda está aberta?";
 const ELEVATED: &str =
     "Esta janela é de um programa em modo administrador: execute o TakeScreen como administrador para exibi-la.";
@@ -674,7 +681,11 @@ const STATE_BITS: isize = (WS_MAXIMIZE.0 | WS_MINIMIZE.0) as isize;
 pub fn take(target: Hwnd, cover: Hwnd, curtain: Hwnd, mon: Rect, fit: Fit) -> Result<Saved, String> {
     let h = target.h();
     let pl = placement(target).ok_or(CLOSED)?;
-    let saved = unsafe { Saved { hwnd: target, placement: pl, style: GetWindowLongPtrW(h, GWL_STYLE), exstyle: GetWindowLongPtrW(h, GWL_EXSTYLE) } };
+    let mut saved = unsafe { Saved { hwnd: target, placement: pl, style: GetWindowLongPtrW(h, GWL_STYLE), exstyle: GetWindowLongPtrW(h, GWL_EXSTYLE) } };
+    // A frameless VLC is stuck in its own full screen: it goes back to screen 1 with the Windows buttons.
+    if needs_frame(h, saved.style) {
+        saved.style = framed(saved.style);
+    }
     place(&saved, pl, cover, curtain, mon, fit)?;
     Ok(saved)
 }
@@ -747,6 +758,11 @@ fn place(saved: &Saved, pl: WINDOWPLACEMENT, cover: Hwnd, curtain: Hwnd, mon: Re
             let was_topmost = GetWindowLongPtrW(cover.h(), GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
             let still = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
             let _ = SetWindowPos(cover.h(), Some(HWND_TOPMOST), 0, 0, 0, 0, still);
+            // Maximize means the native maximized window, with title bar and buttons.
+            let style = GetWindowLongPtrW(h, GWL_STYLE);
+            if needs_frame(h, style) {
+                SetWindowLongPtrW(h, GWL_STYLE, framed(style) & !STATE_BITS);
+            }
             let _ = SetWindowPos(h, Some(cover.h()), mon.left + 40, mon.top + 40, mon.width() - 80, mon.height() - 80, flags | SWP_FRAMECHANGED);
             let _ = ShowWindow(h, SW_MAXIMIZE);
             // A maximized window fills the work area: if the projector has a taskbar, it remains visible.
@@ -793,6 +809,23 @@ pub fn native_fullscreen(class: &str, exe: &str) -> Option<VIRTUAL_KEY> {
         (_, "vlc.exe") => Some(VK_VIDEO_FULLSCREEN),
         _ => None,
     }
+}
+
+/// VLC remembers its full screen state across launches (vlc-qt-interface.ini) and then reopens as a
+/// popup with no title bar and no buttons, which neither F nor Esc clears.
+fn needs_frame(h: HWND, style: isize) -> bool {
+    style as u32 & WS_CAPTION.0 != WS_CAPTION.0 && process_path(window_pid(h)).to_lowercase().ends_with("\\vlc.exe")
+}
+
+/// A frameless VLC before a take: either in its own full screen, where the F key would turn it off,
+/// or stuck without a frame. Esc (`undo_key` of F) leaves the first and does nothing to the second.
+pub fn frameless_vlc(hwnd: Hwnd) -> bool {
+    unsafe { needs_frame(hwnd.h(), GetWindowLongPtrW(hwnd.h(), GWL_STYLE)) }
+}
+
+/// `style` as an ordinary window with title bar, frame and the minimize, maximize and close buttons.
+fn framed(style: isize) -> isize {
+    (style & !(WS_POPUP.0 as isize)) | WS_OVERLAPPEDWINDOW.0 as isize
 }
 
 /// The fit to apply and the key to press afterwards, for the fit the operator chose.
@@ -1414,6 +1447,15 @@ pub fn send_home(hwnd: Hwnd, home: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vlc_preso_ganha_moldura_e_botoes() {
+        let stuck = (WS_POPUP | WS_VISIBLE | WS_SYSMENU).0 as isize;
+        let f = framed(stuck) as u32;
+        assert_eq!(f & WS_POPUP.0, 0);
+        assert_eq!(f & WS_OVERLAPPEDWINDOW.0, WS_OVERLAPPEDWINDOW.0);
+        assert_ne!(f & WS_VISIBLE.0, 0);
+    }
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
         Rect { left, top, right, bottom }

@@ -159,6 +159,11 @@ fn selftest(seq: &[String], fit: Option<Fit>, press: Option<VIRTUAL_KEY>) -> i32
             win::undo_keys(s.hwnd, std::mem::take(&mut toggled), panel);
         }
         let cover = on_air.as_ref().map_or(curtain, |(s, _, _)| s.hwnd);
+        if win::frameless_vlc(w.hwnd) {
+            // Same as the panel: Esc before the take, so F always turns VLC's full screen on.
+            let sent = win::press_key_on(w.hwnd, win::undo_key(win::VK_VIDEO_FULLSCREEN), panel);
+            println!("      VLC sem moldura, Esc antes: {sent:?}");
+        }
         let t0 = Instant::now();
         match win::take(w.hwnd, cover, curtain, ds.rect, fit) {
             Err(e) => {
@@ -236,7 +241,8 @@ fn give_back(old: &Saved, title: &str, before: &WinState, ds: &Monitor, home: &M
     };
     let off_ds = !s.rect.is_some_and(|r| ds.holds(&r));
     let seen = s.shown() == before.shown() && (!s.shown() || s.rect.is_some_and(|r| on_some(&r, mons)));
-    let same_frame = s.style == before.style && s.exstyle == before.exstyle;
+    // A VLC stuck without a frame intentionally comes back with one (Windows then adds an edge exstyle).
+    let same_frame = (s.style == before.style && s.exstyle == before.exstyle) || (old.style() != before.style && s.style == old.style());
     let same_state = s.iconic == before.iconic && s.zoomed == before.zoomed;
     let ok = old.hwnd.exists() && off_ds && seen && same_rect && same_frame && same_state;
     println!(

@@ -151,6 +151,37 @@ fn friendly_app_name(source: &str) -> String {
     name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name).to_owned()
 }
 
+/// Identity of a controllable media source: a Windows media session or a plain window
+/// (VLC does not register a session, so it is driven through WM_APPCOMMAND).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceKey {
+    Session(String),
+    Window(isize),
+}
+
+/// Picks the source the transport buttons act on. Returns the index and whether the
+/// remembered choice vanished. Without a valid choice, the first playing source wins, then the first.
+pub fn resolve(selected: Option<&SourceKey>, keys: &[SourceKey], playing: &[bool]) -> (Option<usize>, bool) {
+    if let Some(i) = selected.and_then(|s| keys.iter().position(|k| k == s)) {
+        return (Some(i), false);
+    }
+    let auto = playing.iter().position(|&p| p).or(if keys.is_empty() { None } else { Some(0) });
+    (auto, selected.is_some())
+}
+
+/// Whether a window process belongs to the app named by a media session ("msedge" and "msedge.exe").
+pub fn same_app(session_app: &str, exe: &str) -> bool {
+    let stem = |s: &str| {
+        let s = s.rsplit(['\\', '/']).next().unwrap_or(s).to_ascii_lowercase();
+        s.strip_suffix(".exe").map(str::to_owned).unwrap_or(s)
+    };
+    !session_app.is_empty() && stem(session_app) == stem(exe)
+}
+
+pub fn is_vlc(exe: &str) -> bool {
+    exe.rsplit(['\\', '/']).next().is_some_and(|n| n.eq_ignore_ascii_case("vlc.exe"))
+}
+
 pub fn send_to_window(h: crate::win::Hwnd, cmd: MediaCmd) -> bool {
     let command = match cmd {
         MediaCmd::Play => 46,
@@ -164,15 +195,16 @@ pub fn send_to_window(h: crate::win::Hwnd, cmd: MediaCmd) -> bool {
     unsafe { PostMessageW(Some(hwnd), WM_APPCOMMAND, WPARAM(0), lparam).is_ok() }
 }
 
-pub fn vlc_args(file: &str, screen: u32) -> Vec<String> {
-    vec![
-        "--fullscreen".into(),
-        "--no-video-title-show".into(),
-        "--no-osd".into(),
-        "--no-qt-fs-controller".into(),
-        format!("--qt-fullscreen-screennumber={screen}"),
-        file.into(),
-    ]
+/// `fullscreen_on`: VLC's own full screen on that monitor; `None` opens an ordinary window,
+/// so the Maximize fit keeps the Windows title bar and buttons.
+pub fn vlc_args(file: &str, fullscreen_on: Option<u32>) -> Vec<String> {
+    let mut args: Vec<String> = vec!["--no-video-title-show".into(), "--no-osd".into()];
+    if let Some(screen) = fullscreen_on {
+        args.splice(0..0, ["--fullscreen".into()]);
+        args.extend(["--no-qt-fs-controller".into(), format!("--qt-fullscreen-screennumber={screen}")]);
+    }
+    args.push(file.into());
+    args
 }
 
 pub fn find_vlc() -> Option<PathBuf> {
@@ -209,10 +241,10 @@ fn registry_string(root: HKEY, key: windows::core::PCWSTR, value: windows::core:
     }
 }
 
-pub fn open_in_vlc(file: &str, screen: u32) -> Result<(), String> {
+pub fn open_in_vlc(file: &str, fullscreen_on: Option<u32>) -> Result<(), String> {
     let path = find_vlc().ok_or_else(|| "VLC não foi encontrado".to_owned())?;
     std::process::Command::new(path)
-        .args(vlc_args(file, screen))
+        .args(vlc_args(file, fullscreen_on))
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -230,10 +262,33 @@ mod tests {
     }
 
     #[test]
+    fn escolhe_fonte_e_volta_para_automatica() {
+        let a = SourceKey::Session("a".into());
+        let b = SourceKey::Window(7);
+        let keys = [a.clone(), b.clone()];
+        assert_eq!(resolve(Some(&b), &keys, &[true, false]), (Some(1), false));
+        assert_eq!(resolve(None, &keys, &[false, true]), (Some(1), false));
+        assert_eq!(resolve(None, &keys, &[false, false]), (Some(0), false));
+        assert_eq!(resolve(Some(&SourceKey::Window(9)), &keys, &[false, true]), (Some(1), true));
+        assert_eq!(resolve(Some(&b), &[], &[]), (None, true));
+        assert_eq!(resolve(None, &[], &[]), (None, false));
+    }
+
+    #[test]
+    fn reconhece_app_e_vlc() {
+        assert!(same_app("msedge", r"C:\Edge\MSEdge.exe"));
+        assert!(!same_app("", ""));
+        assert!(!same_app("chrome", "vlc.exe"));
+        assert!(is_vlc(r"C:\Program Files\VideoLAN\VLC\vlc.exe"));
+        assert!(!is_vlc("vlcx.exe"));
+    }
+
+    #[test]
     fn monta_argumentos_do_vlc() {
-        assert_eq!(vlc_args("video.mp4", 2), [
+        assert_eq!(vlc_args("video.mp4", Some(2)), [
             "--fullscreen", "--no-video-title-show", "--no-osd", "--no-qt-fs-controller",
             "--qt-fullscreen-screennumber=2", "video.mp4",
         ]);
+        assert_eq!(vlc_args("video.mp4", None), ["--no-video-title-show", "--no-osd", "video.mp4"]);
     }
 }

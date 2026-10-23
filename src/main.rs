@@ -98,6 +98,8 @@ struct App {
     /// A tooltip is open: thumbnails, which stay on top of everything, hide.
     tip_open: bool,
     media: media::Hub,
+    /// Media source chosen in the panel (kept for the session only).
+    media_sel: Option<media::SourceKey>,
     mixer: mixer::Hub,
     /// Mixer slider the operator is dragging: the value read from Windows doesn't overwrite it.
     vol_edit: Option<(String, f32, Instant)>,
@@ -141,6 +143,7 @@ impl App {
                 let ctx = cc.egui_ctx.clone();
                 move || ctx.request_repaint()
             }),
+            media_sel: None,
             mixer: mixer::Hub::start({
                 let ctx = cc.egui_ctx.clone();
                 move || ctx.request_repaint()
@@ -350,6 +353,11 @@ impl App {
         self.sync_guard(Some(target));
         let cover = self.on_air_hwnd().unwrap_or(curtain);
         let (fit, key) = self.effective_fit(target, self.fit);
+        if let (true, Some(me)) = (win::frameless_vlc(target), self.me) {
+            // Before the take: leaving its own full screen moves VLC back to its old place.
+            // Esc is not recorded in `toggled`: it only brings VLC out of its own full screen.
+            let _ = win::press_key_on(target, win::undo_key(win::VK_VIDEO_FULLSCREEN), me);
+        }
         let saved = match win::take(target, cover, curtain, ds.rect, fit) {
             Ok(s) => s,
             Err(e) => {
@@ -498,7 +506,10 @@ impl App {
             return;
         }
         let Some(file) = win::pick_media_file(self.me) else { return };
-        self.status = match media::open_in_vlc(&file, self.datashow as u32) {
+        // Maximize keeps VLC as an ordinary window; only "Tela inteira" opens its own full screen on the projector.
+        let fullscreen = (self.fit == Fit::Borderless).then_some(self.datashow as u32);
+        self.status = match media::open_in_vlc(&file, fullscreen) {
+            Ok(()) if fullscreen.is_none() => "VLC aberto em janela. Escolha a janela dele e aperte EXIBIR.".into(),
             Ok(()) => "VLC aberto sem os controles na tela. Escolha a janela dele e aperte EXIBIR.".into(),
             Err(e) => format!("Não consegui abrir o VLC: {e}"),
         };
@@ -990,30 +1001,118 @@ impl App {
     }
 
     fn media_ui(&mut self, ui: &mut egui::Ui) {
-        let sessions = self.media.sessions();
-        if sessions.is_empty() {
-            ui.label(egui::RichText::new("Nenhuma mídia tocando").weak());
+        struct Src {
+            key: media::SourceKey,
+            label: String,
+            info: String,
+            playing: Option<bool>,
+            on_air: bool,
+            icon: Option<egui::TextureHandle>,
+            hwnd: Option<Hwnd>,
+            can: (bool, bool, bool),
         }
-        for s in &sessions {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(&s.app).strong());
-                let (state, color) = if s.playing { ("tocando", PREVIEW_COLOR) } else { ("pausado", ui.visuals().weak_text_color()) };
-                ui.label(egui::RichText::new(state).small().color(color));
-            });
+        let air_exe = self.on_air_hwnd().and_then(|h| self.windows.iter().find(|w| w.hwnd == h)).map(|w| w.exe.clone());
+        let icon_of = |app: &Self, exe: &str| {
+            let w = app.windows.iter().find(|w| media::same_app(exe, &w.exe))?;
+            app.icons.get(&w.hwnd)?.clone()
+        };
+        let mut srcs: Vec<Src> = Vec::new();
+        for s in self.media.sessions() {
             let info = if s.artist.is_empty() { s.title.clone() } else { format!("{} · {}", s.title, s.artist) };
-            if !info.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(info).weak()).truncate());
-            }
+            srcs.push(Src {
+                key: media::SourceKey::Session(s.id.clone()),
+                on_air: air_exe.as_deref().is_some_and(|e| media::same_app(&s.app, e)),
+                icon: icon_of(self, &s.app),
+                label: s.app,
+                info,
+                playing: Some(s.playing),
+                hwnd: None,
+                can: (s.can_prev, s.can_toggle, s.can_next),
+            });
+        }
+        // VLC has no media session: one source per window, driven by WM_APPCOMMAND.
+        for w in self.windows.iter().filter(|w| media::is_vlc(&w.exe)) {
+            srcs.push(Src {
+                key: media::SourceKey::Window(w.hwnd.0),
+                label: "VLC".into(),
+                info: w.title.clone(),
+                playing: None,
+                on_air: self.on_air_hwnd() == Some(w.hwnd),
+                icon: self.icons.get(&w.hwnd).cloned().flatten(),
+                hwnd: Some(w.hwnd),
+                can: (true, true, true),
+            });
+        }
+        if srcs.is_empty() {
+            ui.label(egui::RichText::new("Nenhuma mídia encontrada").weak());
+        }
+        let keys: Vec<_> = srcs.iter().map(|s| s.key.clone()).collect();
+        let playing: Vec<_> = srcs.iter().map(|s| s.playing == Some(true)).collect();
+        let (chosen, lost) = media::resolve(self.media_sel.as_ref(), &keys, &playing);
+        if lost {
+            self.media_sel = None;
+            self.status = "A fonte de mídia escolhida sumiu. Voltei para a automática.".into();
+        }
+        let mut pick = None;
+        let mut action: Option<(usize, media::MediaCmd)> = None;
+        for (i, s) in srcs.iter().enumerate() {
+            let selected = self.media_sel.is_some() && chosen == Some(i);
+            let stroke = if selected { egui::Stroke::new(1.5, ui.visuals().selection.bg_fill) } else { ui.visuals().widgets.noninteractive.bg_stroke };
+            egui::Frame::group(ui.style()).stroke(stroke).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    if let Some(t) = &s.icon {
+                        ui.image((t.id(), egui::vec2(18.0, 18.0)));
+                    }
+                    if ui.selectable_label(selected, egui::RichText::new(&s.label).strong()).clicked() {
+                        pick = Some(s.key.clone());
+                    }
+                    match s.playing {
+                        Some(true) => { ui.label(egui::RichText::new("tocando").small().color(PREVIEW_COLOR)); }
+                        Some(false) => { ui.label(egui::RichText::new("pausado").small().weak()); }
+                        None => {}
+                    }
+                    if s.on_air {
+                        ui.label(egui::RichText::new("NO AR").small().color(egui::Color32::from_rgb(230, 80, 60)));
+                    }
+                    if ui.add_enabled(s.can.1, egui::Button::new("⏯")).clicked() {
+                        action = Some((i, media::MediaCmd::Toggle));
+                    }
+                });
+                if !s.info.is_empty() {
+                    ui.add(egui::Label::new(egui::RichText::new(&s.info).weak()).truncate());
+                }
+            });
+        }
+        if let Some(k) = pick {
+            self.media_sel = Some(k);
+        }
+        // Transport buttons act on the chosen source, not on whichever Windows considers current.
+        if let Some(i) = chosen {
+            let s = &srcs[i];
+            let mode = if self.media_sel.is_some() { "escolhida" } else { "automática" };
+            ui.label(egui::RichText::new(format!("Controles: {} ({mode})", s.label)).small().weak());
             ui.horizontal(|ui| {
-                let cmds = [(s.can_prev, "⏮", media::MediaCmd::Prev), (s.can_toggle, "⏯", media::MediaCmd::Toggle), (s.can_next, "⏭", media::MediaCmd::Next)];
+                let cmds = [(s.can.0, "⏮", media::MediaCmd::Prev), (s.can.1, "⏯", media::MediaCmd::Toggle), (s.can.2, "⏭", media::MediaCmd::Next)];
                 for (can, icon, cmd) in cmds {
                     if ui.add_enabled(can, egui::Button::new(egui::RichText::new(icon).size(16.0)).min_size(egui::vec2(36.0, 24.0))).clicked() {
-                        self.media.send(&s.id, cmd);
+                        action = Some((i, cmd));
                     }
                 }
             });
-            ui.separator();
         }
+        if let Some((i, cmd)) = action {
+            match (&srcs[i].key, srcs[i].hwnd) {
+                (media::SourceKey::Session(id), _) => self.media.send(id, cmd),
+                (_, Some(h)) => {
+                    if !media::send_to_window(h, cmd) {
+                        self.status = "Não consegui mandar o comando para o VLC.".into();
+                    }
+                }
+                _ => {}
+            }
+        }
+        ui.separator();
         // Players without Windows media control still understand the play/pause key sent to the window.
         if let Some(h) = self.on_air_hwnd() {
             if ui.button("⏯ Tocar/pausar a janela NO AR").clicked() && !media::send_to_window(h, media::MediaCmd::Toggle) {
