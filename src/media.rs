@@ -96,15 +96,14 @@ fn enumerate(
     let Ok(view) = manager.GetSessions() else { return Vec::new() };
     let Ok(size) = view.Size() else { return Vec::new() };
     let mut out = Vec::new();
-    let mut app_counts = std::collections::HashMap::<String, usize>::new();
-    for index in 0..size {
-        let Ok(session) = view.GetAt(index) else { continue };
-        let Ok(source) = session.SourceAppUserModelId() else { continue };
-        let source = source.to_string();
-        let app = friendly_app_name(&source);
-        let count = app_counts.entry(source.clone()).or_default();
-        *count += 1;
-        let id = if *count == 1 { source } else { format!("{source}#{count}") };
+    // Every browser window or tab group is its own session with the same source id: they are told apart by order.
+    let sessions: Vec<_> = (0..size).filter_map(|index| view.GetAt(index).ok()).collect();
+    let sources: Vec<String> = sessions.iter().map(|s| s.SourceAppUserModelId().map(|v| v.to_string()).unwrap_or_default()).collect();
+    for ((session, source), id) in sessions.into_iter().zip(&sources).zip(session_ids(&sources)) {
+        if source.is_empty() {
+            continue;
+        }
+        let app = friendly_app_name(source);
         let Ok(info) = session.GetPlaybackInfo() else { continue };
         let status = info.PlaybackStatus().unwrap_or(GlobalSystemMediaTransportControlsSessionPlaybackStatus::Closed);
         let controls = info.Controls().ok();
@@ -144,6 +143,69 @@ fn send_command(
     result.ok().and_then(|op| op.join().ok()).unwrap_or(false)
 }
 
+/// Unique id of each session: the source id, plus `#n` from the second session of the same source on.
+fn session_ids(sources: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashMap::<&str, usize>::new();
+    sources
+        .iter()
+        .map(|source| {
+            let count = seen.entry(source).or_default();
+            *count += 1;
+            if *count == 1 { source.clone() } else { format!("{source}#{count}") }
+        })
+        .collect()
+}
+
+/// Players without a media session that still obey the media keys sent to their window
+/// (WM_APPCOMMAND): lowercase exe name without extension, and the name shown to the operator.
+const WINDOW_PLAYERS: &[(&str, &str)] = &[
+    ("vlc", "VLC"),
+    ("wmplayer", "Windows Media Player"),
+    ("mpc-hc", "MPC-HC"),
+    ("mpc-hc64", "MPC-HC"),
+    ("mpc-be", "MPC-BE"),
+    ("mpc-be64", "MPC-BE"),
+    ("potplayer", "PotPlayer"),
+    ("potplayer64", "PotPlayer"),
+    ("potplayermini", "PotPlayer"),
+    ("potplayermini64", "PotPlayer"),
+    ("mpv", "mpv"),
+    ("mpvnet", "mpv.net"),
+];
+
+/// Friendly names of apps that publish a media session, matched on the session source id.
+const SESSION_APPS: &[(&str, &str)] = &[
+    ("msedge", "Microsoft Edge"),
+    ("chrome", "Google Chrome"),
+    ("firefox", "Firefox"),
+    ("brave", "Brave"),
+    ("opera", "Opera"),
+    ("vivaldi", "Vivaldi"),
+    ("spotify", "Spotify"),
+    ("zunevideo", "Filmes e TV"),
+    ("zunemusic", "Media Player"),
+    ("windows.photos", "Fotos"),
+    ("vlc", "VLC"),
+];
+
+/// Whether a browser window title ("Tab - Profile - Browser") shows the tab of a media session.
+pub fn title_in_window(session_title: &str, window_title: &str) -> bool {
+    !session_title.is_empty() && window_title.contains(session_title)
+}
+
+/// Name of the player when `exe` is one driven through its window, else `None`.
+pub fn window_player(exe: &str) -> Option<&'static str> {
+    let file = exe.rsplit(['\\', '/']).next()?.to_ascii_lowercase();
+    let stem = file.strip_suffix(".exe")?;
+    WINDOW_PLAYERS.iter().find(|(name, _)| *name == stem).map(|(_, label)| *label)
+}
+
+/// Name shown for a media session app (`app` is the cleaned source id).
+pub fn display_name(app: &str) -> String {
+    let lower = app.to_ascii_lowercase();
+    SESSION_APPS.iter().find(|(key, _)| lower.contains(key)).map(|(_, label)| (*label).to_owned()).unwrap_or_else(|| app.to_owned())
+}
+
 /// Extracts a friendly app name from the source string.
 fn friendly_app_name(source: &str) -> String {
     let name = source.rsplit(['\\', '/']).next().unwrap_or(source);
@@ -176,10 +238,6 @@ pub fn same_app(session_app: &str, exe: &str) -> bool {
         s.strip_suffix(".exe").map(str::to_owned).unwrap_or(s)
     };
     !session_app.is_empty() && stem(session_app) == stem(exe)
-}
-
-pub fn is_vlc(exe: &str) -> bool {
-    exe.rsplit(['\\', '/']).next().is_some_and(|n| n.eq_ignore_ascii_case("vlc.exe"))
 }
 
 pub fn send_to_window(h: crate::win::Hwnd, cmd: MediaCmd) -> bool {
@@ -279,8 +337,29 @@ mod tests {
         assert!(same_app("msedge", r"C:\Edge\MSEdge.exe"));
         assert!(!same_app("", ""));
         assert!(!same_app("chrome", "vlc.exe"));
-        assert!(is_vlc(r"C:\Program Files\VideoLAN\VLC\vlc.exe"));
-        assert!(!is_vlc("vlcx.exe"));
+        assert_eq!(window_player(r"C:\Program Files\VideoLAN\VLC\vlc.exe"), Some("VLC"));
+        assert_eq!(window_player("vlcx.exe"), None);
+    }
+
+    #[test]
+    fn reconhece_reprodutores_comuns_do_windows() {
+        for (exe, name) in [("wmplayer.exe", "Windows Media Player"), ("MPC-HC64.exe", "MPC-HC"), ("mpc-be64.exe", "MPC-BE"), ("PotPlayerMini64.exe", "PotPlayer"), ("mpv.exe", "mpv")] {
+            assert_eq!(window_player(exe), Some(name), "{exe}");
+        }
+        // Browsers and Store apps use their media session, not the window.
+        assert_eq!(window_player("msedge.exe"), None);
+        assert_eq!(display_name("msedge"), "Microsoft Edge");
+        assert_eq!(display_name("Microsoft.ZuneVideo_8wekyb3d8bbwe"), "Filmes e TV");
+        assert_eq!(display_name("Microsoft.ZuneMusic_8wekyb3d8bbwe"), "Media Player");
+        assert_eq!(display_name("Microsoft.Windows.Photos_8wekyb3d8bbwe"), "Fotos");
+        assert_eq!(display_name("Spotify"), "Spotify");
+        assert_eq!(display_name("Outro"), "Outro");
+    }
+
+    #[test]
+    fn tres_abas_do_mesmo_navegador_viram_tres_fontes() {
+        let sources: Vec<String> = ["msedge.exe", "Spotify.exe", "msedge.exe", "msedge.exe"].map(String::from).to_vec();
+        assert_eq!(session_ids(&sources), ["msedge.exe", "Spotify.exe", "msedge.exe#2", "msedge.exe#3"]);
     }
 
     #[test]

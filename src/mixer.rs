@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::Interface;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
-    AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
+    AudioSessionStateActive, IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
     IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE, eConsole, eRender,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
@@ -38,7 +39,22 @@ pub struct AudioApp {
     pub sound: Sound,
 }
 
-/// An audio session already linked to its owning program.
+/// Polling period while the mixer is on screen and something changed recently.
+const POLL_ACTIVE: Duration = Duration::from_millis(250);
+/// Polling period while the mixer is on screen but nothing has changed for a while.
+const POLL_STILL: Duration = Duration::from_millis(500);
+/// Polling period while the mixer is not drawn (panel closed, collapsed or minimized).
+const POLL_HIDDEN: Duration = Duration::from_millis(1000);
+/// Cycles without any change before the period relaxes to `POLL_STILL`.
+const STILL_CYCLES: u32 = 20;
+/// The mixer counts as on screen if the UI declared it within this window.
+const WATCH_WINDOW_MS: u64 = 2500;
+/// The cached process tree is rebuilt at least this often, to survive recycled pids.
+const TREE_MAX_AGE: Duration = Duration::from_secs(5);
+/// Number of steps of the level meter: finer changes do not wake the UI.
+const PEAK_STEPS: f32 = 20.0;
+
+/// An audio session already linked to its owning program (or to one process of it).
 #[derive(Clone, Debug, PartialEq)]
 struct Sess {
     key: String,
@@ -49,7 +65,7 @@ struct Sess {
     active: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Snapshot {
     apps: Vec<AudioApp>,
     master: (f32, bool),
@@ -66,6 +82,8 @@ pub struct Hub {
     snapshot: Arc<Mutex<Snapshot>>,
     commands: mpsc::Sender<Command>,
     known: Arc<Mutex<HashSet<String>>>,
+    seen: Arc<AtomicU64>,
+    epoch: Instant,
 }
 
 impl Hub {
@@ -75,20 +93,46 @@ impl Hub {
         let (commands, command_rx) = mpsc::channel();
         let shared = Arc::clone(&snapshot);
         let known_shared = Arc::clone(&known);
+        let seen = Arc::new(AtomicU64::new(0));
+        let seen_shared = Arc::clone(&seen);
+        let epoch = Instant::now();
         thread::spawn(move || {
             let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            let mut cache = Cache::default();
+            let mut still = 0u32;
+            let mut wait = POLL_ACTIVE;
             loop {
-                let commands: Vec<_> = command_rx.try_iter().collect();
-                let known = known_shared.lock().map(|k| k.clone()).unwrap_or_default();
-                let next = tick(&commands, &known);
-                if let Ok(mut current) = shared.lock() {
-                    *current = next;
+                // A command wakes the loop at once, so a slider never waits for the polling period.
+                let mut commands = Vec::new();
+                match command_rx.recv_timeout(wait) {
+                    Ok(first) => {
+                        commands.push(first);
+                        commands.extend(command_rx.try_iter());
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-                on_change();
-                thread::sleep(Duration::from_millis(250));
+                let known = known_shared.lock().map(|k| k.clone()).unwrap_or_default();
+                let next = tick(&mut cache, &commands, &known).quantized();
+                if let Ok(mut current) = shared.lock() {
+                    if *current != next {
+                        *current = next;
+                        still = 0;
+                        on_change();
+                    } else {
+                        still = still.saturating_add(1);
+                    }
+                }
+                let watched = (epoch.elapsed().as_millis() as u64).saturating_sub(seen_shared.load(Ordering::Relaxed)) < WATCH_WINDOW_MS;
+                wait = poll_period(watched, still);
             }
         });
-        Hub { snapshot, commands, known }
+        Hub { snapshot, commands, known, seen, epoch }
+    }
+
+    /// Called by the UI whenever it draws the mixer; without it the polling slows down.
+    pub fn watching(&self) {
+        self.seen.store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
 
     /// Programs with audio sessions (those opened without sound go in `rows`).
@@ -156,9 +200,15 @@ pub fn rows(groups: Vec<AudioApp>, programs: &[(String, String)]) -> Vec<AudioAp
         if key.is_empty() {
             continue;
         }
-        match out.iter_mut().find(|a| a.id == key) {
-            Some(a) => a.name = label.clone(),
-            None => out.push(AudioApp { id: key, name: label.clone(), volume: 1.0, muted: false, peak: 0.0, sound: Sound::None }),
+        if let Some(a) = out.iter_mut().find(|a| a.id == key) {
+            a.name = label.clone();
+            continue;
+        }
+        // An entry `exe|pid` only names an existing instance row; a program already listed
+        // through its per-process rows is not added again.
+        let listed = key.contains('|') || out.iter().any(|a| a.id.starts_with(&format!("{key}|")));
+        if !listed {
+            out.push(AudioApp { id: key, name: label.clone(), volume: 1.0, muted: false, peak: 0.0, sound: Sound::None });
         }
     }
     let rank = |s: Sound| match s {
@@ -232,7 +282,7 @@ fn process_tree() -> (HashMap<u32, u32>, HashMap<u32, String>) {
         if Process32FirstW(snap, &mut entry).is_ok() {
             loop {
                 map.insert(entry.th32ProcessID, entry.th32ParentProcessID);
-                names.insert(entry.th32ProcessID, String::from_utf16_lossy(&entry.szExeFile).trim_end_matches(' ').to_owned());
+                names.insert(entry.th32ProcessID, String::from_utf16_lossy(&entry.szExeFile).trim_end_matches([' ', '\0']).to_owned());
                 if Process32NextW(snap, &mut entry).is_err() {
                     break;
                 }
@@ -243,12 +293,41 @@ fn process_tree() -> (HashMap<u32, u32>, HashMap<u32, String>) {
     (map, names)
 }
 
+/// What survives between polling cycles: the device enumerator, the process tree and the exe path of each pid.
+#[derive(Default)]
+struct Cache {
+    enumerator: Option<IMMDeviceEnumerator>,
+    parent: HashMap<u32, u32>,
+    names: HashMap<u32, String>,
+    paths: HashMap<u32, String>,
+    tree_at: Option<Instant>,
+}
+
+impl Cache {
+    fn enumerator(&mut self) -> Option<IMMDeviceEnumerator> {
+        if self.enumerator.is_none() {
+            self.enumerator = enumerator();
+        }
+        self.enumerator.clone()
+    }
+
+    /// Rebuilds the process tree only when a pid is unknown to it or it grew old.
+    fn ensure_tree(&mut self, pids: &[u32]) {
+        let stale = self.tree_at.is_none_or(|at| at.elapsed() > TREE_MAX_AGE);
+        if stale || pids.iter().any(|p| !self.parent.contains_key(p)) {
+            (self.parent, self.names) = process_tree();
+            self.paths.retain(|pid, _| self.parent.contains_key(pid));
+            self.tree_at = Some(Instant::now());
+        }
+    }
+}
+
 fn enumerator() -> Option<IMMDeviceEnumerator> {
     unsafe { CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL).ok() }
 }
 
-fn render_devices() -> Vec<IMMDevice> {
-    let Some(enumerator) = enumerator() else { return Vec::new() };
+/// Active output devices are listed on every cycle, so plugging a headset is noticed.
+fn render_devices(enumerator: &IMMDeviceEnumerator) -> Vec<IMMDevice> {
     unsafe {
         let Ok(list) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) else { return Vec::new() };
         let count = list.GetCount().unwrap_or(0);
@@ -256,18 +335,73 @@ fn render_devices() -> Vec<IMMDevice> {
     }
 }
 
-fn default_device() -> Option<IMMDevice> {
-    unsafe { enumerator()?.GetDefaultAudioEndpoint(eRender, eConsole).ok() }
+/// Polling period: fast while the mixer is on screen and changing, slow when it is hidden.
+fn poll_period(watched: bool, still_cycles: u32) -> Duration {
+    match (watched, still_cycles >= STILL_CYCLES) {
+        (false, _) => POLL_HIDDEN,
+        (true, true) => POLL_STILL,
+        (true, false) => POLL_ACTIVE,
+    }
+}
+
+/// Meter levels snap to `PEAK_STEPS` steps, so only visible movement counts as a change.
+fn quantize(peak: f32) -> f32 {
+    (peak.clamp(0.0, 1.0) * PEAK_STEPS).round() / PEAK_STEPS
+}
+
+impl Snapshot {
+    fn quantized(mut self) -> Snapshot {
+        for app in &mut self.apps {
+            app.peak = quantize(app.peak);
+        }
+        self
+    }
+}
+
+/// Row id of each session: the program key, or `key|pid` when the same program has several
+/// independent processes with audio (a browser started once per profile or window).
+fn row_ids(sessions: &[(String, u32)]) -> Vec<String> {
+    sessions
+        .iter()
+        .map(|(key, inst)| {
+            let many = sessions.iter().any(|(k, i)| k == key && i != inst);
+            if many && key != SYSTEM_KEY { format!("{key}|{inst}") } else { key.clone() }
+        })
+        .collect()
+}
+
+/// Top process of the program instance that owns `pid`: the highest ancestor still running the exe `key`.
+fn instance_of(pid: u32, key: &str, parent: &HashMap<u32, u32>, exe_of: &mut dyn FnMut(u32) -> String) -> u32 {
+    let mut best = if exe_of(pid) == key { Some(pid) } else { None };
+    let mut at = pid;
+    for _ in 0..16 {
+        let Some(&up) = parent.get(&at) else { break };
+        if up == 0 || up == at {
+            break;
+        }
+        if exe_of(up) == key {
+            best = Some(up);
+        } else if best.is_some() {
+            break;
+        }
+        at = up;
+    }
+    best.unwrap_or(pid)
 }
 
 /// All sessions from all active output devices, already linked to owning program.
 /// Volume and mute commands are applied in the same pass.
-fn read_sessions(commands: &[Command], known: &HashSet<String>) -> Vec<Sess> {
-    let (parent, names) = process_tree();
-    let mut paths: HashMap<u32, String> = HashMap::new();
-    let mut exe_of = |pid: u32| paths.entry(pid).or_insert_with(|| process_path(pid).to_lowercase()).clone();
-    let mut sessions = Vec::new();
-    for device in render_devices() {
+fn read_sessions(cache: &mut Cache, commands: &[Command], known: &HashSet<String>) -> Vec<Sess> {
+    struct Found {
+        control: IAudioSessionControl,
+        vol: ISimpleAudioVolume,
+        key: String,
+        name: String,
+        inst: u32,
+    }
+    let Some(enumerator) = cache.enumerator() else { return Vec::new() };
+    let mut controls = Vec::new();
+    for device in render_devices(&enumerator) {
         let Some(manager) = (unsafe { device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None).ok() }) else { continue };
         let Ok(list) = (unsafe { manager.GetSessionEnumerator() }) else { continue };
         let count = unsafe { list.GetCount() }.unwrap_or(0);
@@ -277,45 +411,61 @@ fn read_sessions(commands: &[Command], known: &HashSet<String>) -> Vec<Sess> {
             let Ok(vol) = control.cast::<ISimpleAudioVolume>() else { continue };
             let pid = unsafe { control2.GetProcessId() }.unwrap_or(0);
             let system = pid == 0 || unsafe { control2.IsSystemSoundsSession() } == windows::core::HRESULT(0);
-            let (key, name) = if system {
-                (SYSTEM_KEY.to_owned(), "Sons do sistema".to_owned())
-            } else {
-                let key = resolve(pid, &parent, &names, &mut exe_of, known);
-                let name = match key.rsplit(['\\', '/']).next() {
-                    Some(file) if !key.starts_with("pid:") => capitalize(file.trim_end_matches(".exe")),
-                    _ => names.get(&pid).map(|n| capitalize(n.trim_end_matches(".exe"))).unwrap_or_else(|| "Desconhecido".into()),
-                };
-                (key, name)
-            };
-            for command in commands {
-                match command {
-                    Command::SetVolume(id, level) if *id == key => {
-                        let _ = unsafe { vol.SetMasterVolume(*level, std::ptr::null()) };
-                    }
-                    Command::SetMute(id, muted) if *id == key => {
-                        let _ = unsafe { vol.SetMute(*muted, std::ptr::null()) };
-                    }
-                    _ => {}
-                }
-            }
-            sessions.push(Sess {
-                key,
-                name,
-                volume: unsafe { vol.GetMasterVolume() }.unwrap_or(0.0).clamp(0.0, 1.0),
-                muted: unsafe { vol.GetMute() }.map(|m| m.as_bool()).unwrap_or(false),
-                peak: control.cast::<IAudioMeterInformation>().ok().and_then(|m| unsafe { m.GetPeakValue().ok() }).unwrap_or(0.0).clamp(0.0, 1.0),
-                active: unsafe { control.GetState() }.unwrap_or_default() == AudioSessionStateActive,
-            });
+            controls.push((control, vol, pid, system));
         }
+    }
+    let pids: Vec<u32> = controls.iter().map(|c| c.2).collect();
+    cache.ensure_tree(&pids);
+    let Cache { parent, names, paths, .. } = cache;
+    let mut exe_of = |pid: u32| paths.entry(pid).or_insert_with(|| process_path(pid).to_lowercase()).clone();
+    let found: Vec<Found> = controls
+        .into_iter()
+        .map(|(control, vol, pid, system)| {
+            if system {
+                return Found { control, vol, key: SYSTEM_KEY.to_owned(), name: "Sons do sistema".to_owned(), inst: 0 };
+            }
+            let key = resolve(pid, parent, names, &mut exe_of, known);
+            let name = match key.rsplit(['\\', '/']).next() {
+                Some(file) if !key.starts_with("pid:") => capitalize(file.trim_end_matches(".exe")),
+                _ => names.get(&pid).map(|n| capitalize(n.trim_end_matches(".exe"))).unwrap_or_else(|| "Desconhecido".into()),
+            };
+            let inst = instance_of(pid, &key, parent, &mut exe_of);
+            Found { control, vol, key, name, inst }
+        })
+        .collect();
+    let ids = row_ids(&found.iter().map(|f| (f.key.clone(), f.inst)).collect::<Vec<_>>());
+    let mut sessions = Vec::new();
+    for (f, key) in found.into_iter().zip(ids) {
+        for command in commands {
+            match command {
+                Command::SetVolume(id, level) if *id == key => {
+                    let _ = unsafe { f.vol.SetMasterVolume(*level, std::ptr::null()) };
+                }
+                Command::SetMute(id, muted) if *id == key => {
+                    let _ = unsafe { f.vol.SetMute(*muted, std::ptr::null()) };
+                }
+                _ => {}
+            }
+        }
+        sessions.push(Sess {
+            key,
+            name: f.name,
+            volume: unsafe { f.vol.GetMasterVolume() }.unwrap_or(0.0).clamp(0.0, 1.0),
+            muted: unsafe { f.vol.GetMute() }.map(|m| m.as_bool()).unwrap_or(false),
+            peak: f.control.cast::<IAudioMeterInformation>().ok().and_then(|m| unsafe { m.GetPeakValue().ok() }).unwrap_or(0.0).clamp(0.0, 1.0),
+            active: unsafe { f.control.GetState() }.unwrap_or_default() == AudioSessionStateActive,
+        });
     }
     sessions
 }
 
 /// One cycle: applies commands (on all devices) and reads state.
-fn tick(commands: &[Command], known: &HashSet<String>) -> Snapshot {
-    let sessions = read_sessions(commands, known);
+fn tick(cache: &mut Cache, commands: &[Command], known: &HashSet<String>) -> Snapshot {
+    let sessions = read_sessions(cache, commands, known);
     // Master volume is always from the default device.
-    let master = default_device()
+    let master = cache
+        .enumerator()
+        .and_then(|e| unsafe { e.GetDefaultAudioEndpoint(eRender, eConsole).ok() })
         .and_then(|d| unsafe { d.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok() })
         .map(|endpoint| unsafe {
             for command in commands {
@@ -440,5 +590,47 @@ mod tests {
         let (playing, quiet) = split_quiet(sorted);
         assert_eq!(playing.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
         assert_eq!(quiet.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["c", "d"]);
+    }
+
+    #[test]
+    fn instancias_do_mesmo_navegador_ganham_ids_proprios() {
+        let one = row_ids(&[("edge".into(), 10), ("vlc".into(), 20)]);
+        assert_eq!(one, ["edge", "vlc"]);
+        let many = row_ids(&[("edge".into(), 10), ("edge".into(), 30), ("edge".into(), 10), (SYSTEM_KEY.into(), 0), (SYSTEM_KEY.into(), 1)]);
+        assert_eq!(many, ["edge|10", "edge|30", "edge|10", "sistema", "sistema"]);
+    }
+
+    #[test]
+    fn instancia_e_o_processo_raiz_do_navegador() {
+        let procs = [(1, 0, "c:\\w\\explorer.exe"), (10, 1, "c:\\e\\edge.exe"), (11, 10, "c:\\e\\edge.exe"), (12, 11, "c:\\e\\gpu.exe"), (30, 1, "c:\\e\\edge.exe"), (31, 30, "c:\\e\\edge.exe")];
+        let (parent, _, exes) = fake(&procs);
+        let mut exe_of = |p: u32| exes.get(&p).cloned().unwrap_or_default();
+        assert_eq!(instance_of(11, "c:\\e\\edge.exe", &parent, &mut exe_of), 10);
+        assert_eq!(instance_of(12, "c:\\e\\edge.exe", &parent, &mut exe_of), 10);
+        assert_eq!(instance_of(31, "c:\\e\\edge.exe", &parent, &mut exe_of), 30);
+        assert_eq!(instance_of(99, "c:\\x.exe", &parent, &mut exe_of), 99);
+    }
+
+    #[test]
+    fn linhas_por_instancia_recebem_o_titulo_e_nao_duplicam() {
+        let app = |id: &str| AudioApp { id: id.into(), name: "Edge".into(), volume: 1.0, muted: false, peak: 0.0, sound: Sound::Playing };
+        let programs = vec![
+            ("c:\\e\\edge.exe".to_string(), "Janela A".to_string()),
+            ("c:\\e\\edge.exe|10".to_string(), "Janela A".to_string()),
+            ("c:\\e\\edge.exe|30".to_string(), "Janela B".to_string()),
+            ("c:\\e\\edge.exe|77".to_string(), "Janela sem audio".to_string()),
+        ];
+        let seen: Vec<_> = rows(vec![app("c:\\e\\edge.exe|10"), app("c:\\e\\edge.exe|30")], &programs).into_iter().map(|a| a.name).collect();
+        assert_eq!(seen, ["Janela A", "Janela B"]);
+    }
+
+    #[test]
+    fn medidor_so_acorda_a_tela_em_degraus_e_o_intervalo_se_adapta() {
+        assert_eq!(quantize(0.01), 0.0);
+        assert_eq!(quantize(0.5), quantize(0.52));
+        assert_ne!(quantize(0.5), quantize(0.6));
+        assert_eq!(poll_period(true, 0), POLL_ACTIVE);
+        assert_eq!(poll_period(true, STILL_CYCLES), POLL_STILL);
+        assert_eq!(poll_period(false, 0), POLL_HIDDEN);
     }
 }

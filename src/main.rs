@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use win::{Fit, Hwnd, Monitor, Saved, Thumbnail, WindowInfo};
 
 const REFRESH: Duration = Duration::from_millis(1000);
+/// Wake-up interval while the panel is minimized or hidden (the window list keeps being read).
+const HIDDEN_REFRESH: Duration = Duration::from_millis(3000);
 const PREVIEW_COLOR: egui::Color32 = egui::Color32::from_rgb(46, 160, 67);
 const AIR_COLOR: egui::Color32 = egui::Color32::from_rgb(218, 54, 51);
 const CARD_W: f32 = 220.0;
@@ -609,7 +611,8 @@ impl App {
         let spacing = ui.spacing().item_spacing.x;
         // Two screens, the button column, the spaces between them and the frame borders.
         let by_width = (ui.available_width() - gap - 2.0 * spacing - 16.0) / 2.0;
-        let by_height = (max_height - 80.0) * 16.0 / 9.0;
+        // Room below the frames for the caption, the button row and the small hint line.
+        let by_height = (max_height - 96.0) * 16.0 / 9.0;
         let width = by_width.min(by_height).max(120.0);
 
         let air = self.on_air_hwnd();
@@ -662,6 +665,12 @@ impl App {
                         self.clear();
                     }
                 });
+                let hz = self.datashow_monitor().map(|m| m.hz).filter(|&hz| hz > 1);
+                let tip = match hz {
+                    Some(hz) => format!("Datashow a {hz} Hz. Vídeo do navegador roda mais leve em tela cheia do vídeo (F)."),
+                    None => "Vídeo do navegador roda mais leve em tela cheia do vídeo (F).".into(),
+                };
+                ui.label(egui::RichText::new(tip).small().weak());
             });
         });
     }
@@ -766,13 +775,15 @@ impl App {
 
         let thumb = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, CARD_HEADER), egui::vec2(CARD_W - 12.0, thumb_h - 6.0));
         painter.rect_filled(thumb, 3.0, egui::Color32::BLACK);
-        if w.minimized {
-            // Minimized window has no image to show: shows the large icon.
+        // A minimized window has no image to show, and the ON AIR window is already live in the
+        // ON AIR frame: a second live copy would make DWM rescale the same video twice. Both show the large icon.
+        if w.minimized || on_air {
             let big = egui::Rect::from_center_size(thumb.center() - egui::vec2(0.0, 8.0), egui::vec2(48.0, 48.0));
             if let Some(t) = icon {
                 painter.image(t.id(), big, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
             }
-            painter.text(thumb.center_bottom() - egui::vec2(0.0, 12.0), egui::Align2::CENTER_CENTER, "minimizada", egui::FontId::proportional(11.0), egui::Color32::GRAY);
+            let note = if on_air { "no ar (imagem no quadro NO AR)" } else { "minimizada" };
+            painter.text(thumb.center_bottom() - egui::vec2(0.0, 12.0), egui::Align2::CENTER_CENTER, note, egui::FontId::proportional(11.0), egui::Color32::GRAY);
         } else {
             self.placed.push((Slot::Card(w.hwnd), to_px(thumb, ui.ctx()), clip));
         }
@@ -1016,25 +1027,33 @@ impl App {
             let w = app.windows.iter().find(|w| media::same_app(exe, &w.exe))?;
             app.icons.get(&w.hwnd)?.clone()
         };
+        let air_title = self.on_air_hwnd().and_then(|h| self.windows.iter().find(|w| w.hwnd == h)).map(|w| w.title.clone()).unwrap_or_default();
         let mut srcs: Vec<Src> = Vec::new();
-        for s in self.media.sessions() {
+        let sessions = self.media.sessions();
+        for s in &sessions {
             let info = if s.artist.is_empty() { s.title.clone() } else { format!("{} · {}", s.title, s.artist) };
+            // Several sessions of one app (browser windows): only the one whose tab is the window title is on air.
+            let siblings = sessions.iter().filter(|o| o.app == s.app).count();
+            let same = air_exe.as_deref().is_some_and(|e| media::same_app(&s.app, e));
             srcs.push(Src {
                 key: media::SourceKey::Session(s.id.clone()),
-                on_air: air_exe.as_deref().is_some_and(|e| media::same_app(&s.app, e)),
+                on_air: same && (siblings == 1 || media::title_in_window(&s.title, &air_title)),
                 icon: icon_of(self, &s.app),
-                label: s.app,
+                label: media::display_name(&s.app),
                 info,
                 playing: Some(s.playing),
                 hwnd: None,
                 can: (s.can_prev, s.can_toggle, s.can_next),
             });
         }
-        // VLC has no media session: one source per window, driven by WM_APPCOMMAND.
-        for w in self.windows.iter().filter(|w| media::is_vlc(&w.exe)) {
+        // Players without a media session (VLC, MPC, PotPlayer, mpv, WMP): one source per window, driven by WM_APPCOMMAND.
+        for (w, name) in self.windows.iter().filter_map(|w| Some((w, media::window_player(&w.exe)?))) {
+            if sessions.iter().any(|s| media::same_app(&s.app, &w.exe)) {
+                continue;
+            }
             srcs.push(Src {
                 key: media::SourceKey::Window(w.hwnd.0),
-                label: "VLC".into(),
+                label: name.into(),
                 info: w.title.clone(),
                 playing: None,
                 on_air: self.on_air_hwnd() == Some(w.hwnd),
@@ -1106,7 +1125,7 @@ impl App {
                 (media::SourceKey::Session(id), _) => self.media.send(id, cmd),
                 (_, Some(h)) => {
                     if !media::send_to_window(h, cmd) {
-                        self.status = "Não consegui mandar o comando para o VLC.".into();
+                        self.status = "Não consegui mandar o comando para o reprodutor.".into();
                     }
                 }
                 _ => {}
@@ -1135,15 +1154,23 @@ impl App {
         let mut programs: Vec<(String, String)> = Vec::new();
         // Window icon of each program, reused from the window cards.
         let mut exe_icons: HashMap<String, egui::TextureHandle> = HashMap::new();
+        // Browsers started more than once (one process per profile) get one mixer row per process, named by its window.
+        let mut instances: Vec<(String, String)> = Vec::new();
         for w in &self.windows {
             if !programs.iter().any(|(p, _)| p.eq_ignore_ascii_case(&w.exe_path)) {
                 programs.push((w.exe_path.clone(), w.title.clone()));
+            }
+            let instance = format!("{}|{}", w.exe_path, w.pid);
+            if !instances.iter().any(|(p, _)| p.eq_ignore_ascii_case(&instance)) {
+                instances.push((instance, w.title.clone()));
             }
             if let Some(Some(t)) = self.icons.get(&w.hwnd) {
                 exe_icons.entry(w.exe_path.to_lowercase()).or_insert_with(|| t.clone());
             }
         }
         self.mixer.set_known(&programs.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+        self.mixer.watching();
+        programs.extend(instances);
         let (playing, quiet) = mixer::split_quiet(mixer::rows(self.mixer.apps(), &programs));
         if playing.is_empty() {
             ui.label(egui::RichText::new("Nenhum programa tocando agora.").weak());
@@ -1162,7 +1189,7 @@ impl App {
                 self.cfg.quiet_open = !self.cfg.quiet_open;
             }
         }
-        ui.label(egui::RichText::new("Navegadores têm um controle só para todas as abas.").small().weak());
+        ui.label(egui::RichText::new("O Windows não separa o volume por aba: janelas de um mesmo navegador e perfil dividem um controle. Janelas de perfis ou navegadores diferentes têm controles próprios.").small().weak());
     }
 
     fn app_row(&mut self, ui: &mut egui::Ui, a: &mixer::AudioApp, exe_icons: &HashMap<String, egui::TextureHandle>) {
@@ -1171,7 +1198,7 @@ impl App {
             mixer::Sound::Idle => format!("{} (parado)", a.name),
             mixer::Sound::None => format!("{} (sem áudio no momento)", a.name),
         };
-        let lead = (exe_icons.get(&a.id), a.name.chars().next().unwrap_or('?'));
+        let lead = (exe_icons.get(a.id.split('|').next().unwrap_or_default()),a.name.chars().next().unwrap_or('?'));
         self.volume_row(ui, &a.id, &name, a.volume, a.muted, Some(a.peak), a.sound != mixer::Sound::None, Some(lead));
     }
 
@@ -1333,6 +1360,14 @@ impl eframe::App for App {
             self.select(h);
             self.status = format!("A apresentação {} abriu no datashow e está na PRÉVIA. Aperte EXIBIR para mostrar.", self.title_of(h));
         }
+        // Minimized or hidden panel: nobody sees the thumbnails, so they are released (DWM stops
+        // copying those windows, the live video included) and the interface is not built.
+        if panel_hidden(&ctx.input(|i| i.viewport().clone())) {
+            self.thumbs.clear();
+            self.placed.clear();
+            ctx.request_repaint_after(HIDDEN_REFRESH);
+            return;
+        }
         // The card under the pointer is measured while drawing; this shows the previous frame's.
         let hovered = self.hovered_card.take();
         self.tip_open = false;
@@ -1389,6 +1424,11 @@ impl eframe::App for App {
             win::destroy(c);
         }
     }
+}
+
+/// The panel cannot be seen: minimized, or reported as fully covered by Windows.
+fn panel_hidden(info: &egui::ViewportInfo) -> bool {
+    info.minimized == Some(true) || info.occluded == Some(true)
 }
 
 /// Adds to `order` the new windows (at the end) and removes the ones that closed.
@@ -1468,6 +1508,20 @@ mod tests {
         assert_eq!(keys, [win::VK_VIDEO_FULLSCREEN]);
         assert_ne!(win::undo_key(win::VK_VIDEO_FULLSCREEN), win::VK_VIDEO_FULLSCREEN);
         assert_eq!(win::undo_key(win::VK_FULLSCREEN), win::VK_FULLSCREEN);
+    }
+
+    #[test]
+    fn painel_oculto_so_quando_minimizado_ou_coberto() {
+        let mut info = egui::ViewportInfo::default();
+        // Unknown state (first frames) counts as visible: the panel must never start blank.
+        assert!(!panel_hidden(&info));
+        info.focused = Some(false);
+        assert!(!panel_hidden(&info), "sem foco o operador ainda ve o painel");
+        info.minimized = Some(true);
+        assert!(panel_hidden(&info));
+        info.minimized = Some(false);
+        info.occluded = Some(true);
+        assert!(panel_hidden(&info));
     }
 
     #[test]

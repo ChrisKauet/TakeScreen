@@ -261,6 +261,7 @@ mod tests {
             title: t.into(),
             exe: String::new(),
             exe_path: String::new(),
+            pid: 0,
             minimized: false,
             uwp: false,
         };

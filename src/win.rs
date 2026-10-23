@@ -86,6 +86,7 @@ pub struct WindowInfo {
     pub title: String,
     pub exe: String,
     pub exe_path: String,
+    pub pid: u32,
     pub minimized: bool,
     /// Microsoft Store apps (Photos, Movies & TV) live inside an "ApplicationFrameWindow".
     pub uwp: bool,
@@ -133,7 +134,7 @@ fn window_info(hwnd: HWND) -> Option<WindowInfo> {
         let exe_path = if uwp { uwp_exe(hwnd, pid) } else { process_path(pid) };
         let exe = exe_path.rsplit('\\').next().unwrap_or_default().to_string();
         let minimized = IsIconic(hwnd).as_bool();
-        Some(WindowInfo { hwnd: Hwnd::from(hwnd), title, exe, exe_path, minimized, uwp })
+        Some(WindowInfo { hwnd: Hwnd::from(hwnd), title, exe, exe_path, pid, minimized, uwp })
     }
 }
 
@@ -411,6 +412,8 @@ pub struct Monitor {
     /// Work area, excluding the taskbar.
     pub work: Rect,
     pub primary: bool,
+    /// Current refresh rate in Hz (0 when Windows does not report it).
+    pub hz: u32,
 }
 
 impl Monitor {
@@ -418,7 +421,8 @@ impl Monitor {
         let n = if self.name.is_empty() { "Monitor" } else { &self.name };
         let num = self.device.trim_start_matches(r"\\.\DISPLAY");
         let principal = if self.primary { ", principal" } else { "" };
-        format!("{n} (tela {num}{principal}, {}x{})", self.rect.width(), self.rect.height())
+        let hz = if self.hz > 1 { format!(", {} Hz", self.hz) } else { String::new() };
+        format!("{n} (tela {num}{principal}, {}x{}{hz})", self.rect.width(), self.rect.height())
     }
 
     /// The window (visible rectangle) is on this monitor: its center falls inside it.
@@ -447,7 +451,12 @@ unsafe extern "system" fn enum_monitors_cb(hmon: HMONITOR, _: HDC, _: *mut RECT,
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
     if GetMonitorInfoW(hmon, &mut info as *mut _ as *mut MONITORINFO).as_bool() {
+        let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+        // Values 0 and 1 mean "hardware default"; `label` hides them.
+        let current = EnumDisplaySettingsW(windows::core::PCWSTR(info.szDevice.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode);
+        let hz = if current.as_bool() { mode.dmDisplayFrequency } else { 0 };
         out.push(Monitor {
+            hz,
             device: utf16_z(&info.szDevice),
             name: String::new(),
             rect: Rect::from_win(info.monitorInfo.rcMonitor),
@@ -1127,12 +1136,44 @@ pub fn undo_keys(target: Hwnd, keys: Vec<VIRTUAL_KEY>, back_to: Hwnd) {
 pub struct Thumbnail {
     pub src: Hwnd,
     id: isize,
+    /// Last state sent to DWM: `None` = unknown, `Some(None)` = hidden, `Some(Some((dest, source)))` = shown.
+    /// Repeating an identical update every frame only costs DWM work, so it is skipped.
+    last: std::cell::Cell<Option<Option<(Rect, Rect)>>>,
+}
+
+/// Visible destination and matching source rectangle of a thumbnail whose source window
+/// measures `size`, centered in `area` preserving its aspect ratio and clipped to `clip`.
+/// `None` when nothing remains visible.
+fn thumb_layout(size: (i32, i32), area: Rect, clip: Rect) -> Option<(Rect, Rect)> {
+    let (sw, sh) = (size.0.max(1) as f32, size.1.max(1) as f32);
+    let scale = (area.width() as f32 / sw).min(area.height() as f32 / sh);
+    let (w, h) = ((sw * scale) as i32, (sh * scale) as i32);
+    let left = area.left + (area.width() - w) / 2;
+    let top = area.top + (area.height() - h) / 2;
+    let dest = Rect { left, top, right: left + w, bottom: top + h };
+    let vis = Rect {
+        left: dest.left.max(clip.left),
+        top: dest.top.max(clip.top),
+        right: dest.right.min(clip.right),
+        bottom: dest.bottom.min(clip.bottom),
+    };
+    if vis.width() <= 0 || vis.height() <= 0 || scale <= 0.0 {
+        return None;
+    }
+    let src = |d: i32, origin: i32| ((d - origin) as f32 / scale).round() as i32;
+    let source = Rect {
+        left: src(vis.left, dest.left),
+        top: src(vis.top, dest.top),
+        right: src(vis.right, dest.left),
+        bottom: src(vis.bottom, dest.top),
+    };
+    Some((vis, source))
 }
 
 impl Thumbnail {
     pub fn new(dest: Hwnd, src: Hwnd) -> Option<Self> {
         let id = unsafe { DwmRegisterThumbnail(dest.h(), src.h()).ok()? };
-        Some(Thumbnail { src, id })
+        Some(Thumbnail { src, id, last: std::cell::Cell::new(None) })
     }
 
     /// `area` in physical pixels, relative to the panel client area. The image is
@@ -1141,23 +1182,14 @@ impl Thumbnail {
     pub fn show(&self, area: Rect, clip: Rect) {
         unsafe {
             let Ok(size) = DwmQueryThumbnailSourceSize(self.id) else { return };
-            let (sw, sh) = (size.cx.max(1) as f32, size.cy.max(1) as f32);
-            let scale = (area.width() as f32 / sw).min(area.height() as f32 / sh);
-            let (w, h) = ((sw * scale) as i32, (sh * scale) as i32);
-            let left = area.left + (area.width() - w) / 2;
-            let top = area.top + (area.height() - h) / 2;
-            let dest = Rect { left, top, right: left + w, bottom: top + h };
-            let vis = Rect {
-                left: dest.left.max(clip.left),
-                top: dest.top.max(clip.top),
-                right: dest.right.min(clip.right),
-                bottom: dest.bottom.min(clip.bottom),
-            };
-            if vis.width() <= 0 || vis.height() <= 0 || scale <= 0.0 {
+            let Some((vis, source)) = thumb_layout((size.cx, size.cy), area, clip) else {
                 self.hide();
                 return;
+            };
+            if self.last.get() == Some(Some((vis, source))) {
+                return;
             }
-            let src = |d: i32, origin: i32| ((d - origin) as f32 / scale).round() as i32;
+            self.last.set(Some(Some((vis, source))));
             let props = DWM_THUMBNAIL_PROPERTIES {
                 dwFlags: DWM_TNP_RECTDESTINATION
                     | DWM_TNP_RECTSOURCE
@@ -1165,12 +1197,7 @@ impl Thumbnail {
                     | DWM_TNP_OPACITY
                     | DWM_TNP_SOURCECLIENTAREAONLY,
                 rcDestination: RECT { left: vis.left, top: vis.top, right: vis.right, bottom: vis.bottom },
-                rcSource: RECT {
-                    left: src(vis.left, dest.left),
-                    top: src(vis.top, dest.top),
-                    right: src(vis.right, dest.left),
-                    bottom: src(vis.bottom, dest.top),
-                },
+                rcSource: RECT { left: source.left, top: source.top, right: source.right, bottom: source.bottom },
                 opacity: 255,
                 fVisible: TRUE,
                 fSourceClientAreaOnly: FALSE,
@@ -1181,6 +1208,10 @@ impl Thumbnail {
     }
 
     pub fn hide(&self) {
+        if self.last.get() == Some(None) {
+            return;
+        }
+        self.last.set(Some(None));
         let props = DWM_THUMBNAIL_PROPERTIES { dwFlags: DWM_TNP_VISIBLE, fVisible: FALSE, ..Default::default() };
         unsafe {
             let _ = DwmUpdateThumbnailProperties(self.id, &props);
@@ -1483,6 +1514,23 @@ mod tests {
         let datashow = rect(-1600, 0, 0, 900);
         assert!(!rect(100, 100, 500, 500).center_in(&datashow));
         assert!(rect(-1500, 100, -200, 800).center_in(&datashow));
+    }
+
+    #[test]
+    fn thumb_layout_keeps_aspect_and_clips() {
+        // A 1920x1080 source in a 400x400 area becomes a centered 400x225 letterbox.
+        let (vis, source) = thumb_layout((1920, 1080), rect(0, 0, 400, 400), rect(0, 0, 1000, 1000)).unwrap();
+        assert_eq!(vis, rect(0, 87, 400, 312));
+        assert_eq!(source, rect(0, 0, 1920, 1080));
+        // Clipping the bottom half shows only the top half of the source.
+        let (vis, source) = thumb_layout((1920, 1080), rect(0, 0, 400, 225), rect(0, 0, 400, 112)).unwrap();
+        assert_eq!(vis, rect(0, 0, 400, 112));
+        assert_eq!(source, rect(0, 0, 1920, 538));
+        // Scrolled out of view: nothing to show.
+        assert_eq!(thumb_layout((1920, 1080), rect(0, 500, 400, 725), rect(0, 0, 400, 400)), None);
+        // The same inputs give the same result, which is what lets `show` skip repeated DWM updates.
+        let a = thumb_layout((800, 600), rect(10, 10, 210, 160), rect(0, 0, 300, 300));
+        assert_eq!(a, thumb_layout((800, 600), rect(10, 10, 210, 160), rect(0, 0, 300, 300)));
     }
 
     #[test]
