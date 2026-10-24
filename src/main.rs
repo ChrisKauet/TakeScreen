@@ -1021,6 +1021,8 @@ impl App {
             icon: Option<egui::TextureHandle>,
             hwnd: Option<Hwnd>,
             can: (bool, bool, bool),
+            /// Browser window without a media session: play/pause is a key sent to the page (`true` = the `k` key).
+            keyed: Option<bool>,
         }
         let air_exe = self.on_air_hwnd().and_then(|h| self.windows.iter().find(|w| w.hwnd == h)).map(|w| w.exe.clone());
         let icon_of = |app: &Self, exe: &str| {
@@ -1044,6 +1046,29 @@ impl App {
                 playing: Some(s.playing),
                 hwnd: None,
                 can: (s.can_prev, s.can_toggle, s.can_next),
+                keyed: None,
+            });
+        }
+        // Chromium exposes one media session per profile, so two windows of one browser can show a single session:
+        // every other window playing video becomes a source of its own.
+        let browser_wins: Vec<media::BrowserWin> = self
+            .windows
+            .iter()
+            .filter(|w| media::is_browser(&w.exe))
+            .map(|w| media::BrowserWin { id: w.hwnd.0, exe: w.exe.clone(), title: w.title.clone() })
+            .collect();
+        for b in media::unmatched_video_windows(&sessions, &browser_wins) {
+            let Some(w) = self.windows.iter().find(|w| w.hwnd.0 == b.id) else { continue };
+            srcs.push(Src {
+                key: media::SourceKey::Window(w.hwnd.0),
+                label: media::display_name(w.exe.trim_end_matches(".exe")),
+                info: media::tab_title(&w.title),
+                playing: None,
+                on_air: self.on_air_hwnd() == Some(w.hwnd),
+                icon: self.icons.get(&w.hwnd).cloned().flatten(),
+                hwnd: Some(w.hwnd),
+                can: (false, true, false),
+                keyed: Some(media::play_key_is_k(&w.title)),
             });
         }
         // Players without a media session (VLC, MPC, PotPlayer, mpv, WMP): one source per window, driven by WM_APPCOMMAND.
@@ -1060,6 +1085,7 @@ impl App {
                 icon: self.icons.get(&w.hwnd).cloned().flatten(),
                 hwnd: Some(w.hwnd),
                 can: (true, true, true),
+                keyed: None,
             });
         }
         if srcs.is_empty() {
@@ -1089,6 +1115,9 @@ impl App {
                     match s.playing {
                         Some(true) => { ui.label(egui::RichText::new("tocando").small().color(PREVIEW_COLOR)); }
                         Some(false) => { ui.label(egui::RichText::new("pausado").small().weak()); }
+                        None if s.keyed.is_some() => {
+                            ui.label(egui::RichText::new("por tecla").small().weak()).on_hover_text("Esta janela não informa se está tocando. O botão aperta a tecla de tocar/pausar da página e devolve o foco ao painel.");
+                        }
                         None => {}
                     }
                     if s.on_air {
@@ -1123,6 +1152,14 @@ impl App {
         if let Some((i, cmd)) = action {
             match (&srcs[i].key, srcs[i].hwnd) {
                 (media::SourceKey::Session(id), _) => self.media.send(id, cmd),
+                (_, Some(h)) if srcs[i].keyed.is_some() => {
+                    let vk = win::VIRTUAL_KEY(if srcs[i].keyed == Some(true) { 0x4B } else { 0x20 });
+                    if let Some(me) = self.me {
+                        if let Err(e) = win::press_key_on(h, vk, me) {
+                            self.status = e;
+                        }
+                    }
+                }
                 (_, Some(h)) => {
                     if !media::send_to_window(h, cmd) {
                         self.status = "Não consegui mandar o comando para o reprodutor.".into();

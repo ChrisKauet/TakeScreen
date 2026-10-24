@@ -193,6 +193,73 @@ pub fn title_in_window(session_title: &str, window_title: &str) -> bool {
     !session_title.is_empty() && window_title.contains(session_title)
 }
 
+/// Browsers whose windows can host a video without a media session of their own.
+const BROWSERS: &[&str] = &["brave", "chrome", "msedge", "firefox", "opera", "vivaldi"];
+
+/// Title fragments of sites that play video; a browser window showing one is a media source.
+const VIDEO_SITES: &[&str] = &["youtube", "twitch", "netflix", "vimeo", "prime video", "disney+", "globoplay", "dailymotion"];
+
+pub fn is_browser(exe: &str) -> bool {
+    let file = exe.rsplit(['\\', '/']).next().unwrap_or_default().to_ascii_lowercase();
+    file.strip_suffix(".exe").is_some_and(|stem| BROWSERS.contains(&stem))
+}
+
+/// Whether a browser window title ("(2) Video - YouTube - Brave") shows a video site.
+pub fn shows_video(window_title: &str) -> bool {
+    let lower = window_title.to_lowercase();
+    VIDEO_SITES.iter().any(|site| lower.contains(site))
+}
+
+/// Tab title without the notification badge "(2) " and the trailing browser/profile names.
+pub fn tab_title(window_title: &str) -> String {
+    let mut text = window_title.trim();
+    if let Some(rest) = text.strip_prefix('(').and_then(|r| r.split_once(") ")) {
+        if rest.0.chars().all(|c| c.is_ascii_digit()) {
+            text = rest.1;
+        }
+    }
+    let mut parts: Vec<&str> = text.split(" - ").collect();
+    let browser_name = |p: &str| {
+        let p = p.replace('\u{200b}', "").to_lowercase();
+        ["brave", "google chrome", "microsoft edge", "mozilla firefox", "opera", "vivaldi"].iter().any(|b| p == *b)
+    };
+    if parts.len() > 1 && browser_name(parts[parts.len() - 1]) {
+        parts.pop();
+        // Edge adds the profile name before its own name.
+        if parts.len() > 1 && parts[parts.len() - 1].starts_with("Profile ") {
+            parts.pop();
+        }
+    }
+    parts.join(" - ")
+}
+
+/// A browser window as a candidate media source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserWin {
+    pub id: isize,
+    pub exe: String,
+    pub title: String,
+}
+
+/// Browser windows that play video but match no media session, so they need a card of their own.
+/// A session claims at most one window (the first whose title contains the session title);
+/// a window claimed by a session is shown through that session, with its state and buttons.
+pub fn unmatched_video_windows<'a>(sessions: &[MediaSession], wins: &'a [BrowserWin]) -> Vec<&'a BrowserWin> {
+    let mut claimed = vec![false; wins.len()];
+    for s in sessions {
+        let hit = wins.iter().enumerate().position(|(i, w)| !claimed[i] && same_app(&s.app, &w.exe) && title_in_window(&s.title, &w.title));
+        if let Some(i) = hit {
+            claimed[i] = true;
+        }
+    }
+    wins.iter().zip(claimed).filter(|(w, claimed)| !claimed && shows_video(&w.title)).map(|(w, _)| w).collect()
+}
+
+/// Key that toggles playback in the page: `k` on YouTube (it works with focus anywhere in the page), else space.
+pub fn play_key_is_k(window_title: &str) -> bool {
+    window_title.to_lowercase().contains("youtube")
+}
+
 /// Name of the player when `exe` is one driven through its window, else `None`.
 pub fn window_player(exe: &str) -> Option<&'static str> {
     let file = exe.rsplit(['\\', '/']).next()?.to_ascii_lowercase();
@@ -354,6 +421,45 @@ mod tests {
         assert_eq!(display_name("Microsoft.Windows.Photos_8wekyb3d8bbwe"), "Fotos");
         assert_eq!(display_name("Spotify"), "Spotify");
         assert_eq!(display_name("Outro"), "Outro");
+    }
+
+    fn session(app: &str, title: &str) -> MediaSession {
+        MediaSession { id: app.into(), app: app.into(), title: title.into(), artist: String::new(), playing: false, can_toggle: true, can_next: false, can_prev: false }
+    }
+
+    fn win(id: isize, title: &str) -> BrowserWin {
+        BrowserWin { id, exe: r"C:\Brave\brave.exe".into(), title: title.into() }
+    }
+
+    #[test]
+    fn titulo_da_aba_sem_navegador_nem_contador() {
+        assert_eq!(tab_title("(2) Fiz um jogo - YouTube - Brave"), "Fiz um jogo - YouTube");
+        assert_eq!(tab_title("Teste Apolo 1 - Profile 1 - Microsoft\u{200b} Edge"), "Teste Apolo 1");
+        assert_eq!(tab_title("Sem navegador"), "Sem navegador");
+        assert_eq!(tab_title("(rascunho) Nota - Brave"), "(rascunho) Nota");
+    }
+
+    #[test]
+    fn so_navegadores_com_site_de_video() {
+        assert!(is_browser(r"C:\Brave\brave.exe") && is_browser("msedge.exe") && !is_browser("vlc.exe"));
+        assert!(shows_video("(2) Zelda - YouTube - Brave"));
+        assert!(!shows_video("Planilha - Brave"));
+        assert!(play_key_is_k("x - YouTube - Brave") && !play_key_is_k("Filme - Netflix - Brave"));
+    }
+
+    #[test]
+    fn duas_janelas_com_uma_sessao_viram_duas_fontes() {
+        let wins = [win(1, "(2) Jogo com IA - YouTube - Brave"), win(2, "(2) Zelda - YouTube - Brave"), win(3, "Planilha - Brave")];
+        // One session only (Chromium shows the active tab): window 1 is covered by it, window 2 stays alone.
+        let left = unmatched_video_windows(&[session("brave", "Jogo com IA")], &wins);
+        assert_eq!(left.iter().map(|w| w.id).collect::<Vec<_>>(), [2]);
+        // No session at all: both video windows appear, the spreadsheet does not.
+        assert_eq!(unmatched_video_windows(&[], &wins).len(), 2);
+        // A session claims a single window, even if two titles contain its text.
+        let twins = [win(1, "Aula - YouTube - Brave"), win(2, "Aula - YouTube - Brave")];
+        assert_eq!(unmatched_video_windows(&[session("brave", "Aula")], &twins).iter().map(|w| w.id).collect::<Vec<_>>(), [2]);
+        // A session of another app does not claim the window.
+        assert_eq!(unmatched_video_windows(&[session("chrome", "Jogo com IA")], &wins[..1]).len(), 1);
     }
 
     #[test]
