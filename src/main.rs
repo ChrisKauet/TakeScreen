@@ -1023,6 +1023,8 @@ impl App {
             can: (bool, bool, bool),
             /// Browser window without a media session: play/pause is a key sent to the page (`true` = the `k` key).
             keyed: Option<bool>,
+            /// Background tab of `hwnd`: it is made the active tab before the key is sent.
+            tab: Option<String>,
         }
         let air_exe = self.on_air_hwnd().and_then(|h| self.windows.iter().find(|w| w.hwnd == h)).map(|w| w.exe.clone());
         let icon_of = |app: &Self, exe: &str| {
@@ -1047,6 +1049,7 @@ impl App {
                 hwnd: None,
                 can: (s.can_prev, s.can_toggle, s.can_next),
                 keyed: None,
+                tab: None,
             });
         }
         // Chromium exposes one media session per profile, so two windows of one browser can show a single session:
@@ -1069,6 +1072,29 @@ impl App {
                 hwnd: Some(w.hwnd),
                 can: (false, true, false),
                 keyed: Some(media::play_key_is_k(&w.title)),
+                tab: None,
+            });
+        }
+        // A paused tab loses its media session and, behind another tab, has no window of its own:
+        // only the browser tab strip (UI Automation) still lists it.
+        self.media.set_browsers(&browser_wins.iter().map(|b| b.id).collect::<Vec<_>>());
+        let tabs = self.media.tabs();
+        for (h, t) in media::background_video_tabs(&sessions, &browser_wins, &tabs) {
+            let Some(w) = self.windows.iter().find(|w| w.hwnd.0 == h) else { continue };
+            // Switching tabs in the ON AIR window would change what the audience sees.
+            let air = self.on_air_hwnd() == Some(w.hwnd);
+            let title = media::tab_title(&t.title);
+            srcs.push(Src {
+                key: media::SourceKey::Tab(h, t.title.clone()),
+                label: media::display_name(w.exe.trim_end_matches(".exe")),
+                info: if air { format!("{title} (aba escondida na janela NO AR)") } else { format!("{title} (outra aba)") },
+                playing: t.audible.then_some(true),
+                on_air: false,
+                icon: self.icons.get(&w.hwnd).cloned().flatten(),
+                hwnd: Some(w.hwnd),
+                can: (false, !air, false),
+                keyed: Some(media::play_key_is_k(&t.title)),
+                tab: Some(t.title.clone()),
             });
         }
         // Players without a media session (VLC, MPC, PotPlayer, mpv, WMP): one source per window, driven by WM_APPCOMMAND.
@@ -1086,6 +1112,7 @@ impl App {
                 hwnd: Some(w.hwnd),
                 can: (true, true, true),
                 keyed: None,
+                tab: None,
             });
         }
         if srcs.is_empty() {
@@ -1154,9 +1181,19 @@ impl App {
                 (media::SourceKey::Session(id), _) => self.media.send(id, cmd),
                 (_, Some(h)) if srcs[i].keyed.is_some() => {
                     let vk = win::VIRTUAL_KEY(if srcs[i].keyed == Some(true) { 0x4B } else { 0x20 });
-                    if let Some(me) = self.me {
+                    let shown = match &srcs[i].tab {
+                        Some(title) => media::select_tab(h.0, title),
+                        None => true,
+                    };
+                    if !shown {
+                        self.status = "Não consegui trazer essa aba para a frente. Clique nela no navegador e tente de novo.".into();
+                    } else if let Some(me) = self.me {
                         if let Err(e) = win::press_key_on(h, vk, me) {
                             self.status = e;
+                        }
+                        // The tab is now the active one and shows up as its window's card: the choice follows it.
+                        if srcs[i].tab.is_some() && self.media_sel.as_ref() == Some(&srcs[i].key) {
+                            self.media_sel = Some(media::SourceKey::Window(h.0));
                         }
                     }
                 }

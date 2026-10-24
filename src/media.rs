@@ -10,7 +10,11 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationSelectionItemPattern, IUIAutomationTreeWalker,
+    UIA_CONTROLTYPE_ID, UIA_DocumentControlTypeId, UIA_SelectionItemPatternId, UIA_TabItemControlTypeId,
+};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
     KEY_READ, REG_SZ,
@@ -43,20 +47,42 @@ pub enum MediaCmd {
 pub struct Hub {
     sessions: Arc<Mutex<Vec<MediaSession>>>,
     commands: mpsc::Sender<(String, MediaCmd)>,
+    /// Browser windows whose tabs are read (set by the panel).
+    browsers: Arc<Mutex<Vec<isize>>>,
+    tabs: Arc<Mutex<Vec<(isize, Vec<Tab>)>>>,
 }
+
+/// Tabs are read every this many session cycles (500 ms each): a paused tab does not need to appear instantly.
+const TAB_CYCLES: u32 = 4;
 
 impl Hub {
     pub fn start(on_change: impl Fn() + Send + 'static) -> Hub {
         let sessions = Arc::new(Mutex::new(Vec::new()));
         let (commands, command_rx) = mpsc::channel::<(String, MediaCmd)>();
         let snapshot = Arc::clone(&sessions);
+        let browsers = Arc::new(Mutex::new(Vec::new()));
+        let tabs = Arc::new(Mutex::new(Vec::new()));
+        let (browsers_shared, tabs_shared) = (Arc::clone(&browsers), Arc::clone(&tabs));
         thread::spawn(move || {
             let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
             let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
                 .ok()
                 .and_then(|op| op.join().ok());
+            let automation = automation();
             let mut current = Vec::new();
+            let mut cycle = 0u32;
             loop {
+                cycle = cycle.wrapping_add(1);
+                if let (Some(a), true) = (&automation, cycle % TAB_CYCLES == 1) {
+                    let wins = browsers_shared.lock().map(|b| b.clone()).unwrap_or_default();
+                    let next: Vec<(isize, Vec<Tab>)> = wins.iter().map(|&h| (h, read_tabs(a, h))).collect();
+                    if let Ok(mut locked) = tabs_shared.lock() {
+                        if *locked != next {
+                            *locked = next;
+                            on_change();
+                        }
+                    }
+                }
                 let mut changed = false;
                 while let Ok((id, cmd)) = command_rx.try_recv() {
                     if send_command(&current, &id, cmd) {
@@ -78,11 +104,25 @@ impl Hub {
                 thread::sleep(Duration::from_millis(500));
             }
         });
-        Hub { sessions, commands }
+        Hub { sessions, commands, browsers, tabs }
     }
 
     pub fn sessions(&self) -> Vec<MediaSession> {
         self.sessions.lock().ok().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Tabs of each browser window, as of the last read (up to 2 s old).
+    pub fn tabs(&self) -> Vec<(isize, Vec<Tab>)> {
+        self.tabs.lock().ok().map(|t| t.clone()).unwrap_or_default()
+    }
+
+    /// Browser windows whose tab strip should be read.
+    pub fn set_browsers(&self, hwnds: &[isize]) {
+        if let Ok(mut b) = self.browsers.lock() {
+            if *b != hwnds {
+                *b = hwnds.to_vec();
+            }
+        }
     }
 
     pub fn send(&self, id: &str, cmd: MediaCmd) {
@@ -255,6 +295,114 @@ pub fn unmatched_video_windows<'a>(sessions: &[MediaSession], wins: &'a [Browser
     wins.iter().zip(claimed).filter(|(w, claimed)| !claimed && shows_video(&w.title)).map(|(w, _)| w).collect()
 }
 
+/// A browser tab read from the window's tab strip through UI Automation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tab {
+    /// Tab title without the browser status notes ("Memory usage", "Audio playing").
+    pub title: String,
+    /// The browser marks the tab as playing sound.
+    pub audible: bool,
+}
+
+/// Splits the accessible name of a tab ("Video - YouTube - Audio playing - Memory usage - 404 MB")
+/// into its title and whether the browser reports it as playing sound.
+pub fn clean_tab_name(name: &str) -> (String, bool) {
+    const NOTES: &[&str] = &["memory usage", "uso de memória", "audio playing", "playing audio", "reproduzindo áudio", "audio muted", "áudio desativado", "som desativado"];
+    const PLAYING: &[&str] = &["audio playing", "playing audio", "reproduzindo áudio"];
+    let mut parts: Vec<&str> = name.trim().split(" - ").collect();
+    let mut audible = false;
+    while parts.len() > 1 {
+        let last = parts[parts.len() - 1].trim().to_lowercase();
+        let before = parts[parts.len() - 2].trim().to_lowercase();
+        // "Memory usage - 404 MB": the size is its own segment, removed together with the note before it.
+        let size = last.ends_with(" mb") || last.ends_with(" gb");
+        if size && NOTES.iter().any(|n| before.starts_with(n)) {
+            parts.pop();
+        } else if NOTES.iter().any(|n| last.starts_with(n)) {
+            audible |= PLAYING.iter().any(|p| last.starts_with(p));
+            parts.pop();
+        } else {
+            break;
+        }
+    }
+    (parts.join(" - "), audible)
+}
+
+/// Background tabs that show a video site and have no media session: they have no window of their
+/// own (the window card shows the active tab), so each one needs a card. `tabs` pairs a window id
+/// with its tabs; windows that are no longer in `wins` are ignored.
+pub fn background_video_tabs<'a>(sessions: &[MediaSession], wins: &[BrowserWin], tabs: &'a [(isize, Vec<Tab>)]) -> Vec<(isize, &'a Tab)> {
+    let mut out = Vec::new();
+    for (hwnd, list) in tabs {
+        let Some(w) = wins.iter().find(|w| w.id == *hwnd) else { continue };
+        let active = tab_title(&w.title);
+        for t in list {
+            let session = sessions.iter().any(|s| same_app(&s.app, &w.exe) && title_in_window(&s.title, &t.title));
+            if tab_title(&t.title) != active && shows_video(&t.title) && !session {
+                out.push((*hwnd, t));
+            }
+        }
+    }
+    out
+}
+
+/// Walks the browser interface of `hwnd` (the page itself is skipped) and calls `f` with every
+/// tab and its accessible name until `f` returns `true`.
+fn for_each_tab(automation: &IUIAutomation, hwnd: isize, mut f: impl FnMut(&IUIAutomationElement, &str) -> bool) {
+    fn walk(walker: &IUIAutomationTreeWalker, parent: &IUIAutomationElement, depth: u32, f: &mut dyn FnMut(&IUIAutomationElement, &str) -> bool) -> bool {
+        let mut child = unsafe { walker.GetFirstChildElement(parent) }.ok();
+        while let Some(c) = child {
+            let kind = unsafe { c.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
+            if kind == UIA_TabItemControlTypeId {
+                let name = unsafe { c.CurrentName() }.map(|n| n.to_string()).unwrap_or_default();
+                if f(&c, &name) {
+                    return true;
+                }
+            } else if kind != UIA_DocumentControlTypeId && depth < 12 && walk(walker, &c, depth + 1, f) {
+                // The page (Document) is never entered: reading it would make the browser build its whole accessibility tree.
+                return true;
+            }
+            child = unsafe { walker.GetNextSiblingElement(&c) }.ok();
+        }
+        false
+    }
+    unsafe {
+        let Ok(root) = automation.ElementFromHandle(HWND(hwnd as *mut _)) else { return };
+        let Ok(walker) = automation.ControlViewWalker() else { return };
+        walk(&walker, &root, 0, &mut f);
+    }
+}
+
+fn automation() -> Option<IUIAutomation> {
+    unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok() }
+}
+
+fn read_tabs(automation: &IUIAutomation, hwnd: isize) -> Vec<Tab> {
+    let mut tabs = Vec::new();
+    for_each_tab(automation, hwnd, |_, name| {
+        let (title, audible) = clean_tab_name(name);
+        tabs.push(Tab { title, audible });
+        false
+    });
+    tabs
+}
+
+/// Makes the tab titled `title` the active tab of browser window `hwnd`, as a click on it would.
+pub fn select_tab(hwnd: isize, title: &str) -> bool {
+    // The panel thread may already have COM; a second call with the same mode only adds a reference.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let Some(automation) = automation() else { return false };
+    let mut selected = false;
+    for_each_tab(&automation, hwnd, |tab, name| {
+        if clean_tab_name(name).0 != title {
+            return false;
+        }
+        selected = unsafe { tab.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId).and_then(|p| p.Select()) }.is_ok();
+        true
+    });
+    selected
+}
+
 /// Key that toggles playback in the page: `k` on YouTube (it works with focus anywhere in the page), else space.
 pub fn play_key_is_k(window_title: &str) -> bool {
     window_title.to_lowercase().contains("youtube")
@@ -286,6 +434,8 @@ fn friendly_app_name(source: &str) -> String {
 pub enum SourceKey {
     Session(String),
     Window(isize),
+    /// A background tab of a browser window, by window and tab title.
+    Tab(isize, String),
 }
 
 /// Picks the source the transport buttons act on. Returns the index and whether the
@@ -460,6 +610,37 @@ mod tests {
         assert_eq!(unmatched_video_windows(&[session("brave", "Aula")], &twins).iter().map(|w| w.id).collect::<Vec<_>>(), [2]);
         // A session of another app does not claim the window.
         assert_eq!(unmatched_video_windows(&[session("chrome", "Jogo com IA")], &wins[..1]).len(), 1);
+    }
+
+    #[test]
+    fn nome_da_aba_sem_avisos_do_navegador() {
+        // Names read from the Brave tab strip on 2026-10-23.
+        assert_eq!(clean_tab_name("(2) Zelda - YouTube - Memory usage - 404 MB"), ("(2) Zelda - YouTube".to_owned(), false));
+        assert_eq!(clean_tab_name("TV Globo Ao Vivo | Globoplay - Audio playing - Memory usage - 477 MB"), ("TV Globo Ao Vivo | Globoplay".to_owned(), true));
+        assert_eq!(clean_tab_name("Top Agent Skill Repositories on GitHub · Linkly AI"), ("Top Agent Skill Repositories on GitHub · Linkly AI".to_owned(), false));
+        assert_eq!(clean_tab_name("Aula - YouTube - Reproduzindo áudio"), ("Aula - YouTube".to_owned(), true));
+        // A title that merely ends in a size is kept.
+        assert_eq!(clean_tab_name("Download 300 MB"), ("Download 300 MB".to_owned(), false));
+    }
+
+    fn tab(title: &str) -> Tab {
+        Tab { title: title.into(), audible: false }
+    }
+
+    #[test]
+    fn abas_de_video_em_segundo_plano_viram_fontes() {
+        let wins = [win(1, "affaan-m/ECC - Brave"), win(2, "(2) Zelda - YouTube - Brave")];
+        let tabs = vec![
+            (1, vec![tab("(2) Fiz um jogo - YouTube"), tab("Pesquisa Google"), tab("affaan-m/ECC")]),
+            (2, vec![tab("Release notes"), tab("(2) Zelda - YouTube")]),
+        ];
+        // Only the hidden YouTube tab of window 1: the active tabs already have a window card, and other sites are not video.
+        let found: Vec<_> = background_video_tabs(&[], &wins, &tabs).into_iter().map(|(h, t)| (h, t.title.clone())).collect();
+        assert_eq!(found, [(1, "(2) Fiz um jogo - YouTube".to_owned())]);
+        // A tab that has a media session is shown through the session.
+        assert!(background_video_tabs(&[session("brave", "Fiz um jogo")], &wins, &tabs).is_empty());
+        // Tabs of a window that closed are ignored.
+        assert!(background_video_tabs(&[], &wins[1..], &tabs[..1]).is_empty());
     }
 
     #[test]
