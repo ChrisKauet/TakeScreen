@@ -102,6 +102,10 @@ struct App {
     media: media::Hub,
     /// Media source chosen in the panel (kept for the session only).
     media_sel: Option<media::SourceKey>,
+    /// Browser pages seen playing in this session (window, tab title): they stay listed when paused.
+    media_seen: std::collections::HashSet<(isize, String)>,
+    /// Lowercase exe paths of programs with a source in the media panel: the mixer keeps them in view.
+    media_exes: std::collections::HashSet<String>,
     mixer: mixer::Hub,
     /// Mixer slider the operator is dragging: the value read from Windows doesn't overwrite it.
     vol_edit: Option<(String, f32, Instant)>,
@@ -146,6 +150,8 @@ impl App {
                 move || ctx.request_repaint()
             }),
             media_sel: None,
+            media_seen: Default::default(),
+            media_exes: Default::default(),
             mixer: mixer::Hub::start({
                 let ctx = cc.egui_ctx.clone();
                 move || ctx.request_repaint()
@@ -1053,13 +1059,22 @@ impl App {
             });
         }
         // Chromium exposes one media session per profile, so two windows of one browser can show a single session:
-        // every other window playing video becomes a source of its own.
-        let browser_wins: Vec<media::BrowserWin> = self
+        // every other window with a media page becomes a source of its own.
+        let mut browser_wins: Vec<media::BrowserWin> = self
             .windows
             .iter()
             .filter(|w| media::is_browser(&w.exe))
-            .map(|w| media::BrowserWin { id: w.hwnd.0, exe: w.exe.clone(), title: w.title.clone() })
+            .map(|w| media::BrowserWin { id: w.hwnd.0, exe: w.exe.clone(), title: w.title.clone(), media: false })
             .collect();
+        // A paused tab loses its media session and, behind another tab, has no window of its own:
+        // only the browser tab strip (UI Automation) still lists it.
+        self.media.set_browsers(&browser_wins.iter().map(|b| b.id).collect::<Vec<_>>());
+        let tabs = self.media.tabs();
+        // Any site counts once it has played: the sound indicator or the media session marks the page for the session.
+        media::remember_media(&mut self.media_seen, &sessions, &browser_wins, &tabs);
+        for b in &mut browser_wins {
+            b.media = self.media_seen.contains(&(b.id, media::tab_title(&b.title)));
+        }
         for b in media::unmatched_video_windows(&sessions, &browser_wins) {
             let Some(w) = self.windows.iter().find(|w| w.hwnd.0 == b.id) else { continue };
             srcs.push(Src {
@@ -1075,11 +1090,7 @@ impl App {
                 tab: None,
             });
         }
-        // A paused tab loses its media session and, behind another tab, has no window of its own:
-        // only the browser tab strip (UI Automation) still lists it.
-        self.media.set_browsers(&browser_wins.iter().map(|b| b.id).collect::<Vec<_>>());
-        let tabs = self.media.tabs();
-        for (h, t) in media::background_video_tabs(&sessions, &browser_wins, &tabs) {
+        for (h, t) in media::background_video_tabs(&sessions, &browser_wins, &tabs, &self.media_seen) {
             let Some(w) = self.windows.iter().find(|w| w.hwnd.0 == h) else { continue };
             // Switching tabs in the ON AIR window would change what the audience sees.
             let air = self.on_air_hwnd() == Some(w.hwnd);
@@ -1118,6 +1129,13 @@ impl App {
         if srcs.is_empty() {
             ui.label(egui::RichText::new("Nenhuma mídia encontrada").weak());
         }
+        // Programs behind the sources: the mixer keeps their volume row in view even while they are silent.
+        self.media_exes = self
+            .windows
+            .iter()
+            .filter(|w| srcs.iter().any(|s| s.hwnd == Some(w.hwnd)) || sessions.iter().any(|s| media::same_app(&s.app, &w.exe)))
+            .map(|w| w.exe_path.to_lowercase())
+            .collect();
         let keys: Vec<_> = srcs.iter().map(|s| s.key.clone()).collect();
         let playing: Vec<_> = srcs.iter().map(|s| s.playing == Some(true)).collect();
         let (chosen, lost) = media::resolve(self.media_sel.as_ref(), &keys, &playing);
@@ -1245,7 +1263,7 @@ impl App {
         self.mixer.set_known(&programs.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
         self.mixer.watching();
         programs.extend(instances);
-        let (playing, quiet) = mixer::split_quiet(mixer::rows(self.mixer.apps(), &programs));
+        let (playing, quiet) = mixer::split_quiet(mixer::rows(self.mixer.apps(), &programs), &self.media_exes);
         if playing.is_empty() {
             ui.label(egui::RichText::new("Nenhum programa tocando agora.").weak());
         }
@@ -1274,6 +1292,10 @@ impl App {
         };
         let lead = (exe_icons.get(a.id.split('|').next().unwrap_or_default()),a.name.chars().next().unwrap_or('?'));
         self.volume_row(ui, &a.id, &name, a.volume, a.muted, Some(a.peak), a.sound != mixer::Sound::None, Some(lead));
+        // Windows keeps a volume only for an open audio stream; a paused or muted page has none.
+        if a.sound == mixer::Sound::None && self.media_exes.contains(&a.id) {
+            ui.label(egui::RichText::new("Pausado ou mudo: o Windows só libera o volume quando ele tocar.").small().weak());
+        }
     }
 
     /// Name, mute button, 0-100 slider, and for programs, the level bar.
@@ -1459,7 +1481,7 @@ impl eframe::App for App {
             };
             // Version is laid out first from the right, so the status text truncates before overlapping it.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(concat!("TakeScreen v", env!("CARGO_PKG_VERSION")));
+                ui.weak(concat!("TakeScreen v", env!("CARGO_PKG_VERSION"), " beta"));
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.add(egui::Label::new(text).truncate());
                 });

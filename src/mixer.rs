@@ -220,9 +220,11 @@ pub fn rows(groups: Vec<AudioApp>, programs: &[(String, String)]) -> Vec<AudioAp
     out
 }
 
-/// Splits the sorted list into programs playing now and the quiet ones (idle session or none).
-pub fn split_quiet(rows: Vec<AudioApp>) -> (Vec<AudioApp>, Vec<AudioApp>) {
-    rows.into_iter().partition(|a| a.sound == Sound::Playing)
+/// Splits the sorted list into the rows always in view and the quiet ones (idle session or none).
+/// In view: programs playing now, and programs in `featured` (lowercase exe paths with a media
+/// source in the media panel), so a paused or muted player keeps its row in sight.
+pub fn split_quiet(rows: Vec<AudioApp>, featured: &HashSet<String>) -> (Vec<AudioApp>, Vec<AudioApp>) {
+    rows.into_iter().partition(|a| a.sound == Sound::Playing || featured.contains(a.id.split('|').next().unwrap_or_default()))
 }
 
 /// Exe owning the audio of `pid`: itself if it has a window, else the first ancestor with a window
@@ -587,9 +589,16 @@ mod tests {
     fn separa_os_que_nao_tocam() {
         let app = |id: &str, sound| AudioApp { id: id.into(), name: id.into(), volume: 1.0, muted: false, peak: 0.0, sound };
         let sorted = rows(vec![app("c", Sound::Idle), app("a", Sound::Playing), app("b", Sound::Playing)], &[("d".to_string(), "d".to_string())]);
-        let (playing, quiet) = split_quiet(sorted);
+        let (playing, quiet) = split_quiet(sorted.clone(), &HashSet::new());
         assert_eq!(playing.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
         assert_eq!(quiet.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["c", "d"]);
+        // A program with a media source (a paused or muted browser page) stays in view, even without audio.
+        let (playing, quiet) = split_quiet(sorted, &HashSet::from(["d".to_string()]));
+        assert_eq!(playing.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["a", "b", "d"]);
+        assert_eq!(quiet.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["c"]);
+        // Per-process rows ("exe|pid") follow their program.
+        let row = |id: &str| AudioApp { id: id.into(), name: id.into(), volume: 1.0, muted: false, peak: 0.0, sound: Sound::Idle };
+        assert_eq!(split_quiet(vec![row("d|42")], &HashSet::from(["d".to_string()])).0.len(), 1);
     }
 
     #[test]

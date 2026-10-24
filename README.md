@@ -19,7 +19,8 @@
 [![Baixar para Windows / Download for Windows](https://img.shields.io/badge/Baixar%20para%20Windows%20%2F%20Download%20for%20Windows-TakeScreen.zip-da3633?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/ChrisKauet/TakeScreen/releases/latest/download/TakeScreen-windows-x64.zip)
 
 <sub>Versão mais nova, portátil, sem instalar nada · <a href="https://github.com/ChrisKauet/TakeScreen/releases">todas as versões</a></sub><br>
-<sub>Latest version, portable, nothing to install · <a href="https://github.com/ChrisKauet/TakeScreen/releases">all releases</a></sub>
+<sub>Latest version, portable, nothing to install · <a href="https://github.com/ChrisKauet/TakeScreen/releases">all releases</a></sub><br>
+<sub>⚠️ Versões beta: podem ter falhas. Beta versions: expect rough edges.</sub>
 
 <br><br>
 

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -279,9 +280,11 @@ pub struct BrowserWin {
     pub id: isize,
     pub exe: String,
     pub title: String,
+    /// Its page is known to be a media page through a signal other than the title (see `remember_media`).
+    pub media: bool,
 }
 
-/// Browser windows that play video but match no media session, so they need a card of their own.
+/// Browser windows that play media but match no media session, so they need a card of their own.
 /// A session claims at most one window (the first whose title contains the session title);
 /// a window claimed by a session is shown through that session, with its state and buttons.
 pub fn unmatched_video_windows<'a>(sessions: &[MediaSession], wins: &'a [BrowserWin]) -> Vec<&'a BrowserWin> {
@@ -292,7 +295,7 @@ pub fn unmatched_video_windows<'a>(sessions: &[MediaSession], wins: &'a [Browser
             claimed[i] = true;
         }
     }
-    wins.iter().zip(claimed).filter(|(w, claimed)| !claimed && shows_video(&w.title)).map(|(w, _)| w).collect()
+    wins.iter().zip(claimed).filter(|(w, claimed)| !claimed && (w.media || shows_video(&w.title))).map(|(w, _)| w).collect()
 }
 
 /// A browser tab read from the window's tab strip through UI Automation.
@@ -302,43 +305,72 @@ pub struct Tab {
     pub title: String,
     /// The browser marks the tab as playing sound.
     pub audible: bool,
+    /// The browser shows a sound indicator on the tab (playing or muted): the page is a player, whatever the site.
+    pub noted: bool,
 }
 
 /// Splits the accessible name of a tab ("Video - YouTube - Audio playing - Memory usage - 404 MB")
-/// into its title and whether the browser reports it as playing sound.
-pub fn clean_tab_name(name: &str) -> (String, bool) {
-    const NOTES: &[&str] = &["memory usage", "uso de memória", "audio playing", "playing audio", "reproduzindo áudio", "audio muted", "áudio desativado", "som desativado"];
+/// into its title and the sound indicators the browser appends to it.
+pub fn parse_tab(name: &str) -> Tab {
+    const NOTES: &[&str] = &["memory usage", "uso de memória"];
     const PLAYING: &[&str] = &["audio playing", "playing audio", "reproduzindo áudio"];
+    const MUTED: &[&str] = &["audio muted", "tab muted", "site muted", "áudio desativado", "som desativado"];
     let mut parts: Vec<&str> = name.trim().split(" - ").collect();
-    let mut audible = false;
+    let (mut audible, mut noted) = (false, false);
     while parts.len() > 1 {
         let last = parts[parts.len() - 1].trim().to_lowercase();
         let before = parts[parts.len() - 2].trim().to_lowercase();
+        let starts = |list: &[&str]| list.iter().any(|n| last.starts_with(n));
         // "Memory usage - 404 MB": the size is its own segment, removed together with the note before it.
         let size = last.ends_with(" mb") || last.ends_with(" gb");
         if size && NOTES.iter().any(|n| before.starts_with(n)) {
             parts.pop();
-        } else if NOTES.iter().any(|n| last.starts_with(n)) {
-            audible |= PLAYING.iter().any(|p| last.starts_with(p));
+        } else if starts(NOTES) || starts(PLAYING) || starts(MUTED) {
+            audible |= starts(PLAYING);
+            noted |= starts(PLAYING) || starts(MUTED);
             parts.pop();
         } else {
             break;
         }
     }
-    (parts.join(" - "), audible)
+    Tab { title: parts.join(" - "), audible, noted }
 }
 
-/// Background tabs that show a video site and have no media session: they have no window of their
+/// Whether a page is a media source: a known video site in its title, a sound indicator on its tab,
+/// or a page already seen playing in this session (`seen`), which keeps paused players of any site listed.
+fn media_page(title: &str, noted: bool, seen: bool) -> bool {
+    noted || seen || shows_video(title)
+}
+
+/// Pages seen as players, by window and tab title (`tab_title`): a tab with a sound indicator, or a
+/// tab or window whose title holds the title of a media session of the same browser. Entries of
+/// windows that closed are dropped.
+pub fn remember_media(seen: &mut HashSet<(isize, String)>, sessions: &[MediaSession], wins: &[BrowserWin], tabs: &[(isize, Vec<Tab>)]) {
+    seen.retain(|(h, _)| wins.iter().any(|w| w.id == *h));
+    for w in wins {
+        let played = |title: &str| sessions.iter().any(|s| same_app(&s.app, &w.exe) && title_in_window(&s.title, title));
+        if played(&w.title) {
+            seen.insert((w.id, tab_title(&w.title)));
+        }
+        let list = tabs.iter().find(|(h, _)| *h == w.id).map(|(_, l)| l.as_slice()).unwrap_or_default();
+        for t in list.iter().filter(|t| t.noted || played(&t.title)) {
+            seen.insert((w.id, tab_title(&t.title)));
+        }
+    }
+}
+
+/// Background tabs that are media pages and have no media session: they have no window of their
 /// own (the window card shows the active tab), so each one needs a card. `tabs` pairs a window id
 /// with its tabs; windows that are no longer in `wins` are ignored.
-pub fn background_video_tabs<'a>(sessions: &[MediaSession], wins: &[BrowserWin], tabs: &'a [(isize, Vec<Tab>)]) -> Vec<(isize, &'a Tab)> {
+pub fn background_video_tabs<'a>(sessions: &[MediaSession], wins: &[BrowserWin], tabs: &'a [(isize, Vec<Tab>)], seen: &HashSet<(isize, String)>) -> Vec<(isize, &'a Tab)> {
     let mut out = Vec::new();
     for (hwnd, list) in tabs {
         let Some(w) = wins.iter().find(|w| w.id == *hwnd) else { continue };
         let active = tab_title(&w.title);
         for t in list {
+            let title = tab_title(&t.title);
             let session = sessions.iter().any(|s| same_app(&s.app, &w.exe) && title_in_window(&s.title, &t.title));
-            if tab_title(&t.title) != active && shows_video(&t.title) && !session {
+            if title != active && !session && media_page(&t.title, t.noted, seen.contains(&(*hwnd, title.clone()))) {
                 out.push((*hwnd, t));
             }
         }
@@ -380,8 +412,7 @@ fn automation() -> Option<IUIAutomation> {
 fn read_tabs(automation: &IUIAutomation, hwnd: isize) -> Vec<Tab> {
     let mut tabs = Vec::new();
     for_each_tab(automation, hwnd, |_, name| {
-        let (title, audible) = clean_tab_name(name);
-        tabs.push(Tab { title, audible });
+        tabs.push(parse_tab(name));
         false
     });
     tabs
@@ -394,7 +425,7 @@ pub fn select_tab(hwnd: isize, title: &str) -> bool {
     let Some(automation) = automation() else { return false };
     let mut selected = false;
     for_each_tab(&automation, hwnd, |tab, name| {
-        if clean_tab_name(name).0 != title {
+        if parse_tab(name).title != title {
             return false;
         }
         selected = unsafe { tab.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId).and_then(|p| p.Select()) }.is_ok();
@@ -578,7 +609,7 @@ mod tests {
     }
 
     fn win(id: isize, title: &str) -> BrowserWin {
-        BrowserWin { id, exe: r"C:\Brave\brave.exe".into(), title: title.into() }
+        BrowserWin { id, exe: r"C:\Brave\brave.exe".into(), title: title.into(), media: false }
     }
 
     #[test]
@@ -614,17 +645,49 @@ mod tests {
 
     #[test]
     fn nome_da_aba_sem_avisos_do_navegador() {
-        // Names read from the Brave tab strip on 2026-10-23.
-        assert_eq!(clean_tab_name("(2) Zelda - YouTube - Memory usage - 404 MB"), ("(2) Zelda - YouTube".to_owned(), false));
-        assert_eq!(clean_tab_name("TV Globo Ao Vivo | Globoplay - Audio playing - Memory usage - 477 MB"), ("TV Globo Ao Vivo | Globoplay".to_owned(), true));
-        assert_eq!(clean_tab_name("Top Agent Skill Repositories on GitHub · Linkly AI"), ("Top Agent Skill Repositories on GitHub · Linkly AI".to_owned(), false));
-        assert_eq!(clean_tab_name("Aula - YouTube - Reproduzindo áudio"), ("Aula - YouTube".to_owned(), true));
+        let parsed = |name: &str| {
+            let t = parse_tab(name);
+            (t.title, t.audible, t.noted)
+        };
+        // Names read from the Brave and Chrome tab strips on 2026-10-23.
+        assert_eq!(parsed("(2) Zelda - YouTube - Memory usage - 404 MB"), ("(2) Zelda - YouTube".to_owned(), false, false));
+        assert_eq!(parsed("TV Globo Ao Vivo | Globoplay - Audio playing - Memory usage - 477 MB"), ("TV Globo Ao Vivo | Globoplay".to_owned(), true, true));
+        assert_eq!(parsed("Avicii - Wake Me Up (Official Video) - YouTube - Memory usage - 264 MB"), ("Avicii - Wake Me Up (Official Video) - YouTube".to_owned(), false, false));
+        assert_eq!(parsed("Top Agent Skill Repositories on GitHub · Linkly AI"), ("Top Agent Skill Repositories on GitHub · Linkly AI".to_owned(), false, false));
+        assert_eq!(parsed("Aula - YouTube - Reproduzindo áudio"), ("Aula - YouTube".to_owned(), true, true));
+        // A muted tab is still a player, though it is not audible.
+        assert_eq!(parsed("Radio - Audio muted"), ("Radio".to_owned(), false, true));
         // A title that merely ends in a size is kept.
-        assert_eq!(clean_tab_name("Download 300 MB"), ("Download 300 MB".to_owned(), false));
+        assert_eq!(parsed("Download 300 MB"), ("Download 300 MB".to_owned(), false, false));
     }
 
     fn tab(title: &str) -> Tab {
-        Tab { title: title.into(), audible: false }
+        Tab { title: title.into(), audible: false, noted: false }
+    }
+
+    #[test]
+    fn qualquer_site_que_tocou_continua_na_lista() {
+        let wins = [win(1, "Alarm01.wav - Brave"), win(2, "Podcast X - Brave"), win(3, "Planilha - Brave")];
+        let mut noted = tab("Radio Gaucha");
+        noted.noted = true;
+        let tabs = vec![(1, vec![tab("Alarm01.wav")]), (2, vec![tab("Podcast X"), noted]), (3, vec![tab("Planilha")])];
+        let mut seen = HashSet::new();
+        // Window 1 had a media session; window 2 has a tab with a sound indicator; window 3 never played.
+        remember_media(&mut seen, &[session("brave", "Alarm01.wav")], &wins, &tabs);
+        assert!(seen.contains(&(1, "Alarm01.wav".to_owned())) && seen.contains(&(2, "Radio Gaucha".to_owned())));
+        assert_eq!(seen.len(), 2);
+        // The session is gone (paused for a long time): the remembered window still has a card.
+        let mut known = wins.clone();
+        for w in &mut known {
+            w.media = seen.contains(&(w.id, tab_title(&w.title)));
+        }
+        assert_eq!(unmatched_video_windows(&[], &known).iter().map(|w| w.id).collect::<Vec<_>>(), [1]);
+        // The background tab with a sound indicator gets a card, whatever the site.
+        let found: Vec<_> = background_video_tabs(&[], &wins, &tabs, &seen).into_iter().map(|(h, t)| (h, t.title.clone())).collect();
+        assert_eq!(found, [(2, "Radio Gaucha".to_owned())]);
+        // Closing window 2 forgets its pages.
+        remember_media(&mut seen, &[], &wins[..1], &tabs);
+        assert_eq!(seen.len(), 1);
     }
 
     #[test]
@@ -635,12 +698,13 @@ mod tests {
             (2, vec![tab("Release notes"), tab("(2) Zelda - YouTube")]),
         ];
         // Only the hidden YouTube tab of window 1: the active tabs already have a window card, and other sites are not video.
-        let found: Vec<_> = background_video_tabs(&[], &wins, &tabs).into_iter().map(|(h, t)| (h, t.title.clone())).collect();
+        let none = HashSet::new();
+        let found: Vec<_> = background_video_tabs(&[], &wins, &tabs, &none).into_iter().map(|(h, t)| (h, t.title.clone())).collect();
         assert_eq!(found, [(1, "(2) Fiz um jogo - YouTube".to_owned())]);
         // A tab that has a media session is shown through the session.
-        assert!(background_video_tabs(&[session("brave", "Fiz um jogo")], &wins, &tabs).is_empty());
+        assert!(background_video_tabs(&[session("brave", "Fiz um jogo")], &wins, &tabs, &none).is_empty());
         // Tabs of a window that closed are ignored.
-        assert!(background_video_tabs(&[], &wins[1..], &tabs[..1]).is_empty());
+        assert!(background_video_tabs(&[], &wins[1..], &tabs[..1], &none).is_empty());
     }
 
     #[test]

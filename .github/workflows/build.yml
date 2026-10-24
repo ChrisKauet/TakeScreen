@@ -57,9 +57,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/TakeScreen-windows-x64.zip
-          name: TakeScreen ${{ github.ref_name }}
+          name: TakeScreen ${{ github.ref_name }} (beta)
           body: |
-            Baixe o TakeScreen em:
+            Versão beta: pode ter falhas. Baixe o TakeScreen em:
             https://github.com/ChrisKauet/TakeScreen/releases/latest/download/TakeScreen-windows-x64.zip
 
             Extraia e abra o TakeScreen.exe. Não precisa instalar nada.
